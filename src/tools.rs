@@ -116,12 +116,6 @@ pub async fn execute_tool(
                 .and_then(|v| v.as_u64())
                 .map(|v| v as usize);
 
-            let display = if query.len() > 50 {
-                format!("{}... in {}", &query[..50], path)
-            } else {
-                format!("{} in {}", query, path)
-            };
-
             let checked_path = match policy.check_path_allowed(Path::new(path)) {
                 Ok(p) => p,
                 Err(err) => {
@@ -273,12 +267,6 @@ pub async fn execute_tool(
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
 
-            let display = if old_str.len() > 40 {
-                format!("{} ({}→{})", path, &old_str[..40], new_str.len())
-            } else {
-                format!("{}", path)
-            };
-
             let checked_path = match policy.check_path_allowed(Path::new(path)) {
                 Ok(p) => p,
                 Err(err) => {
@@ -309,11 +297,6 @@ pub async fn execute_tool(
         }
         "semantic_search" => {
             let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
-            let display = if query.len() > 50 {
-                format!("{}...", &query[..50])
-            } else {
-                query.to_string()
-            };
 
             let result = execute_semantic_search(query, policy).await;
             let success = !result.starts_with("Error");
