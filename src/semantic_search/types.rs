@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::hash::{Hash, Hasher};
+use std::path::{Path, PathBuf};
 
 /// A chunk of code extracted from a source file
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -121,10 +122,7 @@ pub struct SearchConfig {
 impl Default for SearchConfig {
     fn default() -> Self {
         Self {
-            index_dir: dirs::home_dir()
-                .unwrap_or_else(|| PathBuf::from("."))
-                .join(".lorikeet")
-                .join("index"),
+            index_dir: default_index_base_dir(),
             top_k: 10,
             min_score: 0.3,
             max_chunk_size: 2000,
@@ -139,6 +137,35 @@ impl Default for SearchConfig {
             ],
         }
     }
+}
+
+impl SearchConfig {
+    pub fn for_workspace(workspace_root: &Path) -> Self {
+        let mut cfg = Self::default();
+        cfg.index_dir = index_dir_for_workspace(workspace_root);
+        cfg
+    }
+}
+
+fn default_index_base_dir() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".lorikeet")
+        .join("index")
+}
+
+pub fn index_dir_for_workspace(workspace_root: &Path) -> PathBuf {
+    let base = default_index_base_dir();
+    base.join(project_id(workspace_root))
+}
+
+fn project_id(root: &Path) -> String {
+    let canon = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    let s = canon.to_string_lossy().to_string();
+
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    s.hash(&mut h);
+    format!("{:016x}", h.finish())
 }
 
 /// Statistics about the index

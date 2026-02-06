@@ -12,7 +12,7 @@ use crate::events::AppEvent;
 use crate::llm::{call_llm, ChatMessage};
 use crate::memory::MemoryManager;
 use crate::sandbox::SandboxPolicy;
-use crate::semantic_search::{SearchConfig, SemanticSearch};
+use crate::semantic_search::{index_dir_for_workspace, SearchConfig, SemanticSearch};
 use crate::session::{replay_into, SessionStore};
 use crate::tools::execute_tool;
 use crate::types::ToolCallMessage;
@@ -618,6 +618,7 @@ impl App {
     pub fn start_background_indexing(&self) {
         let tx = self.event_tx.clone();
         let policy = self.sandbox_policy.clone();
+        let workspace_root = self.workspace_root.clone();
         tokio::spawn(async move {
             let _ = tx.send(AppEvent::IndexingStarted);
 
@@ -625,9 +626,10 @@ impl App {
             let tx_for_blocking = tx.clone();
 
             // Run indexing in a blocking task since it's CPU-intensive
-            let result =
-                tokio::task::spawn_blocking(move || run_background_index(tx_for_blocking, policy))
-                    .await;
+            let result = tokio::task::spawn_blocking(move || {
+                run_background_index(tx_for_blocking, policy, workspace_root)
+            })
+            .await;
 
             if let Err(e) = result {
                 // Task panicked
@@ -984,7 +986,7 @@ impl App {
                     .and_then(|g| g.auto_index)
                     .unwrap_or(true)
                     && matches!(self.indexing_status, IndexingStatus::NotStarted)
-                    && !index_file_exists()
+                    && !index_file_exists(&self.workspace_root)
                 {
                     self.start_background_indexing();
                 }
@@ -2298,6 +2300,7 @@ fn truncate_for_summary(s: &str, max: usize) -> String {
 fn run_background_index(
     tx: mpsc::UnboundedSender<AppEvent>,
     policy: Arc<SandboxPolicy>,
+    workspace_root: PathBuf,
 ) -> Result<(usize, usize), String> {
     // Catch any panics from dependencies
     let result = std::panic::catch_unwind(|| {
@@ -2311,7 +2314,8 @@ fn run_background_index(
             Err(e) => return Err(e.to_string()),
         };
 
-        let search = match SemanticSearch::with_defaults() {
+        let cfg = SearchConfig::for_workspace(&workspace_root);
+        let search = match SemanticSearch::new(cfg) {
             Ok(s) => s,
             Err(e) => return Err(format!("init: {}", e)),
         };
@@ -2339,8 +2343,8 @@ fn run_background_index(
     }
 }
 
-fn index_file_exists() -> bool {
-    let index_dir = SearchConfig::default().index_dir;
+fn index_file_exists(workspace_root: &std::path::Path) -> bool {
+    let index_dir = index_dir_for_workspace(workspace_root);
     let index_path = index_dir.join("index.bin");
     std::fs::metadata(index_path)
         .map(|m| m.len() > 0)
@@ -2348,11 +2352,15 @@ fn index_file_exists() -> bool {
 }
 
 fn load_existing_index_status() -> IndexingStatus {
-    if !index_file_exists() {
+    // Note: this reads *existing* index metadata only; it does not start indexing.
+    // The app will kick off background indexing from main.rs depending on config.
+    let workspace_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    if !index_file_exists(&workspace_root) {
         return IndexingStatus::NotStarted;
     }
 
-    match SemanticSearch::with_defaults() {
+    let cfg = SearchConfig::for_workspace(&workspace_root);
+    match SemanticSearch::new(cfg) {
         Ok(search) => {
             let stats = search.stats();
             IndexingStatus::Complete {

@@ -10,7 +10,7 @@ use tokio::sync::mpsc;
 
 use crate::events::AppEvent;
 use crate::sandbox::SandboxPolicy;
-use crate::semantic_search::{format_search_results, SemanticSearch};
+use crate::semantic_search::{format_search_results, SearchConfig, SemanticSearch};
 
 pub const TOOL_NAMES: &[&str] = &[
     "bash",
@@ -569,9 +569,10 @@ async fn execute_semantic_search(query: &str, policy: &SandboxPolicy) -> String 
     let search_mutex = get_semantic_search();
     let mut search_guard = search_mutex.lock();
 
-    // Initialize if not already done
+    // Initialize if not already done.
     if search_guard.is_none() {
-        match SemanticSearch::with_defaults() {
+        let cfg = SearchConfig::for_workspace(&checked_root);
+        match SemanticSearch::new(cfg) {
             Ok(search) => {
                 // Set project root to current directory
                 search.set_project_root(checked_root);
@@ -623,7 +624,8 @@ pub async fn index_directory_for_search(
 
     // Initialize if not already done
     if search_guard.is_none() {
-        match SemanticSearch::with_defaults() {
+        let cfg = SearchConfig::for_workspace(&checked_path);
+        match SemanticSearch::new(cfg) {
             Ok(search) => {
                 *search_guard = Some(search);
             }

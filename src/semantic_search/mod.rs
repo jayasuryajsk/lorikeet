@@ -15,6 +15,7 @@ use index::{IndexError, VectorIndex};
 use types::{CodeChunk, IndexStats, Language, SearchResult};
 
 // Re-export key types for external use
+pub use types::index_dir_for_workspace;
 pub use types::SearchConfig;
 
 /// Semantic search engine for code

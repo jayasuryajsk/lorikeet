@@ -32,7 +32,7 @@ use config::AppConfig;
 use events::AppEvent;
 use memory::MemoryManager;
 use sandbox::SandboxPolicy;
-use semantic_search::{SearchConfig, SemanticSearch};
+use semantic_search::{index_dir_for_workspace, SearchConfig, SemanticSearch};
 use tools::TOOL_NAMES;
 use ui::ui;
 
@@ -137,7 +137,7 @@ async fn main() -> Result<()> {
         api_key,
         sandbox_policy,
         config.clone(),
-        workspace_root,
+        workspace_root.clone(),
         memory,
     );
 
@@ -155,7 +155,7 @@ async fn main() -> Result<()> {
         .as_ref()
         .and_then(|g| g.auto_index)
         .unwrap_or(true)
-        && !index_file_exists()
+        && !index_file_exists(&workspace_root)
     {
         // Start background indexing for semantic search
         app.start_background_indexing();
@@ -182,8 +182,8 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-fn index_file_exists() -> bool {
-    let index_dir = SearchConfig::default().index_dir;
+fn index_file_exists(workspace_root: &std::path::Path) -> bool {
+    let index_dir = index_dir_for_workspace(workspace_root);
     let index_path = index_dir.join("index.bin");
     std::fs::metadata(index_path)
         .map(|m| m.len() > 0)
@@ -237,8 +237,9 @@ async fn run_index_command(args: &[String]) -> Result<()> {
     println!("(This will download the embedding model on first run, ~22MB)");
     println!();
 
-    // Create semantic search and index
-    let search = SemanticSearch::with_defaults()
+    // Create semantic search and index (workspace-specific index dir)
+    let cfg = SearchConfig::for_workspace(&checked_dir);
+    let search = SemanticSearch::new(cfg)
         .map_err(|e| color_eyre::eyre::eyre!("Failed to initialize semantic search: {}", e))?;
 
     match search.index_directory(&checked_dir) {
