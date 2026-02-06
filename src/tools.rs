@@ -9,8 +9,8 @@ use tokio::process::Command;
 use tokio::sync::mpsc;
 
 use crate::events::AppEvent;
-use crate::semantic_search::{format_search_results, SemanticSearch};
 use crate::sandbox::SandboxPolicy;
+use crate::semantic_search::{format_search_results, SemanticSearch};
 
 pub const TOOL_NAMES: &[&str] = &[
     "bash",
@@ -86,7 +86,10 @@ pub async fn execute_tool(
         "rg" => {
             let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
             let path = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
-            let context = args.get("context").and_then(|v| v.as_u64()).map(|v| v as usize);
+            let context = args
+                .get("context")
+                .and_then(|v| v.as_u64())
+                .map(|v| v as usize);
 
             let display = if query.len() > 50 {
                 format!("{}... in {}", &query[..50], path)
@@ -192,8 +195,14 @@ pub async fn execute_tool(
         }
         "edit_file" => {
             let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
-            let old_str = args.get("old_string").and_then(|v| v.as_str()).unwrap_or("");
-            let new_str = args.get("new_string").and_then(|v| v.as_str()).unwrap_or("");
+            let old_str = args
+                .get("old_string")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let new_str = args
+                .get("new_string")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
 
             let display = if old_str.len() > 40 {
                 format!("{} ({}→{})", path, &old_str[..40], new_str.len())
@@ -484,7 +493,8 @@ async fn execute_semantic_search(query: &str, policy: &SandboxPolicy) -> String 
     match search.search(query) {
         Ok(results) => {
             if results.is_empty() {
-                "No results found. The index may be empty - try indexing the project first.".to_string()
+                "No results found. The index may be empty - try indexing the project first."
+                    .to_string()
             } else {
                 format_search_results(&results)
             }
@@ -510,9 +520,7 @@ pub async fn index_directory_for_search(
     path: &std::path::Path,
     policy: &SandboxPolicy,
 ) -> Result<String, String> {
-    let checked_path = policy
-        .check_path_allowed(path)
-        .map_err(|e| e.to_string())?;
+    let checked_path = policy.check_path_allowed(path).map_err(|e| e.to_string())?;
 
     let search_mutex = get_semantic_search();
     let mut search_guard = search_mutex.lock();
@@ -532,15 +540,10 @@ pub async fn index_directory_for_search(
     let search = search_guard.as_ref().unwrap();
 
     match search.index_directory(&checked_path) {
-        Ok(stats) => {
-            Ok(format!(
-                "Indexed {} chunks from {} files\nIndex size: {} bytes\nLanguages: {:?}",
-                stats.total_chunks,
-                stats.total_files,
-                stats.index_size_bytes,
-                stats.languages
-            ))
-        }
+        Ok(stats) => Ok(format!(
+            "Indexed {} chunks from {} files\nIndex size: {} bytes\nLanguages: {:?}",
+            stats.total_chunks, stats.total_files, stats.index_size_bytes, stats.languages
+        )),
         Err(e) => Err(format!("Error indexing: {}", e)),
     }
 }
@@ -554,13 +557,19 @@ async fn edit_file(path: &Path, old_string: &str, new_string: &str) -> String {
 
     // Check if old_string exists
     if !content.contains(old_string) {
-        return format!("Error: Could not find the specified text in {}", path.display());
+        return format!(
+            "Error: Could not find the specified text in {}",
+            path.display()
+        );
     }
 
     // Check for uniqueness - count occurrences
     let count = content.matches(old_string).count();
     if count > 1 {
-        return format!("Error: Found {} occurrences of the text. Please provide a more unique string.", count);
+        return format!(
+            "Error: Found {} occurrences of the text. Please provide a more unique string.",
+            count
+        );
     }
 
     // Replace
@@ -582,7 +591,10 @@ async fn edit_file(path: &Path, old_string: &str, new_string: &str) -> String {
     }
 }
 
-fn check_bash_paths(policy: &SandboxPolicy, command: &str) -> Result<(), crate::sandbox::SandboxError> {
+fn check_bash_paths(
+    policy: &SandboxPolicy,
+    command: &str,
+) -> Result<(), crate::sandbox::SandboxError> {
     let mut parts = command.split_whitespace();
     let _exec = parts.next();
 

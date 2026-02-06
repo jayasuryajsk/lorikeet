@@ -1,14 +1,16 @@
 use ratatui::{
     layout::Margin,
     prelude::*,
-    widgets::{Block, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap},
+    widgets::{
+        Block, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap,
+    },
 };
 
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::app::{App, IndexingStatus, Pane, Role, ToolStatus, ToolOutput};
-use crate::theme;
+use crate::app::{App, IndexingStatus, Pane, Role, ToolOutput, ToolStatus};
 use crate::markdown;
+use crate::theme;
 
 const INDEXING_SPINNER: &[&str] = &["⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷"];
 
@@ -39,8 +41,7 @@ pub fn ui(frame: &mut Frame, app: &mut App) {
 
     let splitter_style = Style::default().fg(Color::DarkGray);
     app.splitter_area = main_chunks[1];
-    let splitter = Paragraph::new("│".repeat(main_chunks[1].height as usize))
-        .style(splitter_style);
+    let splitter = Paragraph::new("│".repeat(main_chunks[1].height as usize)).style(splitter_style);
     frame.render_widget(splitter, main_chunks[1]);
 
     let chat_border_style = Style::default().fg(Color::DarkGray);
@@ -169,13 +170,18 @@ pub fn ui(frame: &mut Frame, app: &mut App) {
 
         if app.current_response.is_empty() && app.current_reasoning.is_empty() {
             // Show spinner with elapsed time
-            let elapsed = app.processing_start
+            let elapsed = app
+                .processing_start
                 .map(|t| t.elapsed())
                 .unwrap_or_default();
             let time_str = if elapsed.as_secs() >= 60 {
                 format!("{}m {}s", elapsed.as_secs() / 60, elapsed.as_secs() % 60)
             } else if elapsed.as_secs() > 0 {
-                format!("{}.{}s", elapsed.as_secs(), elapsed.as_millis() % 1000 / 100)
+                format!(
+                    "{}.{}s",
+                    elapsed.as_secs(),
+                    elapsed.as_millis() % 1000 / 100
+                )
             } else {
                 format!("{}ms", elapsed.as_millis())
             };
@@ -186,10 +192,14 @@ pub fn ui(frame: &mut Frame, app: &mut App) {
         } else if !app.current_response.is_empty() {
             // Show streaming content with spinner
             let theme = markdown::Theme::agent();
-            let md_lines = markdown::render(&app.current_response, theme, chat_width.saturating_sub(4));
+            let md_lines =
+                markdown::render(&app.current_response, theme, chat_width.saturating_sub(4));
 
             if let Some(first) = md_lines.first() {
-                let mut first_spans = vec![Span::styled(format!("{} ", spinner), Style::default().fg(Color::Yellow))];
+                let mut first_spans = vec![Span::styled(
+                    format!("{} ", spinner),
+                    Style::default().fg(Color::Yellow),
+                )];
                 first_spans.extend(first.spans.iter().cloned());
                 all_lines.push(Line::from(first_spans));
             }
@@ -201,9 +211,10 @@ pub fn ui(frame: &mut Frame, app: &mut App) {
             }
         } else if !app.current_reasoning.is_empty() {
             // Has reasoning but no response yet - show spinner
-            all_lines.push(Line::from(vec![
-                Span::styled(format!("{} ", spinner), Style::default().fg(Color::Yellow)),
-            ]));
+            all_lines.push(Line::from(vec![Span::styled(
+                format!("{} ", spinner),
+                Style::default().fg(Color::Yellow),
+            )]));
         }
     }
 
@@ -238,15 +249,15 @@ pub fn ui(frame: &mut Frame, app: &mut App) {
             Block::default()
                 .borders(Borders::ALL)
                 .border_style(chat_border_style)
-                .title(chat_title)
+                .title(chat_title),
         )
         .scroll((app.messages_scroll as u16, 0));
     frame.render_widget(messages_widget, left_chunks[0]);
 
     // Chat scrollbar - use max_scroll as content length so thumb reaches bottom
     let scrollbar_content = if max_scroll > 0 { max_scroll } else { 1 };
-    let mut chat_scrollbar_state = ScrollbarState::new(scrollbar_content)
-        .position(app.messages_scroll);
+    let mut chat_scrollbar_state =
+        ScrollbarState::new(scrollbar_content).position(app.messages_scroll);
     let chat_scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
         .begin_symbol(None)
         .end_symbol(None)
@@ -254,7 +265,10 @@ pub fn ui(frame: &mut Frame, app: &mut App) {
         .thumb_symbol("█");
     frame.render_stateful_widget(
         chat_scrollbar,
-        left_chunks[0].inner(Margin { vertical: 1, horizontal: 0 }),
+        left_chunks[0].inner(Margin {
+            vertical: 1,
+            horizontal: 0,
+        }),
         &mut chat_scrollbar_state,
     );
 
@@ -278,7 +292,9 @@ pub fn ui(frame: &mut Frame, app: &mut App) {
     }
 
     // Status bar
-    let mut status_text = " ESC quit │ TAB switch │ CTRL+←/→ resize │ SHIFT+↑↓ scroll │ PgUp/PgDn │ ENTER send".to_string();
+    let mut status_text =
+        " ESC quit │ TAB switch │ CTRL+←/→ resize │ SHIFT+↑↓ scroll │ PgUp/PgDn │ ENTER send"
+            .to_string();
     if app.current_turn_id > 0 {
         status_text.push_str(" │ e tools");
     }
@@ -295,11 +311,8 @@ pub fn ui(frame: &mut Frame, app: &mut App) {
         status_text.push_str(" (/verify)");
     }
 
-    let status = Paragraph::new(status_text)
-        .style(Style::default().fg(Color::DarkGray));
+    let status = Paragraph::new(status_text).style(Style::default().fg(Color::DarkGray));
     frame.render_widget(status, left_chunks[2]);
-
-
 
     // Context sidebar (right pane)
     app.context_area = main_chunks[2];
@@ -314,12 +327,16 @@ fn render_indexing_status(status: &IndexingStatus, spinner_frame: usize) -> Stri
     let spinner = INDEXING_SPINNER[spinner_frame % INDEXING_SPINNER.len()];
 
     match status {
-        IndexingStatus::NotStarted => {
-            String::new()
-        }
-        IndexingStatus::Indexing { files_done, total_files } => {
+        IndexingStatus::NotStarted => String::new(),
+        IndexingStatus::Indexing {
+            files_done,
+            total_files,
+        } => {
             if *total_files > 0 {
-                format!(" {} Indexing... {}/{} files", spinner, files_done, total_files)
+                format!(
+                    " {} Indexing... {}/{} files",
+                    spinner, files_done, total_files
+                )
             } else {
                 format!(" {} Indexing...", spinner)
             }
@@ -352,7 +369,11 @@ fn render_settings_popup(frame: &mut Frame, app: &mut App) {
     frame.render_widget(block, popup_area);
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(5), Constraint::Length(3), Constraint::Length(1)])
+        .constraints([
+            Constraint::Min(5),
+            Constraint::Length(3),
+            Constraint::Length(1),
+        ])
         .split(inner);
 
     let rows = app.settings_rows();
@@ -368,7 +389,10 @@ fn render_settings_popup(frame: &mut Frame, app: &mut App) {
         } else {
             Style::default().fg(Color::White)
         };
-        lines.push(Line::from(Span::styled(format!("{}{}", prefix, trimmed), style)));
+        lines.push(Line::from(Span::styled(
+            format!("{}{}", prefix, trimmed),
+            style,
+        )));
     }
 
     let list = Paragraph::new(lines).wrap(Wrap { trim: true });
@@ -482,7 +506,10 @@ fn render_tool_inline(
 
     out.push(Line::from(vec![
         Span::raw("  "),
-        Span::styled(format!("{} ", status_indicator), Style::default().fg(status_color)),
+        Span::styled(
+            format!("{} ", status_indicator),
+            Style::default().fg(status_color),
+        ),
         Span::raw(format!("{} ", icon)),
         Span::styled(
             format!("{} ", action),
@@ -504,7 +531,11 @@ fn render_tool_inline(
 
     let lines: Vec<&str> = tool.output.lines().collect();
     let total = lines.len();
-    let k = if tool.status == ToolStatus::Running { 8 } else { 20 };
+    let k = if tool.status == ToolStatus::Running {
+        8
+    } else {
+        20
+    };
     let start = total.saturating_sub(k);
     let tail = &lines[start..];
 
@@ -560,7 +591,10 @@ fn render_context_sidebar(frame: &mut Frame, app: &mut App, area: Rect) {
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::DarkGray))
         .title(title)
-        .title_bottom(render_indexing_status(&app.indexing_status, app.indexing_spinner_frame));
+        .title_bottom(render_indexing_status(
+            &app.indexing_status,
+            app.indexing_spinner_frame,
+        ));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -672,7 +706,6 @@ fn truncate_line(line: &str, width: usize) -> String {
     out
 }
 
-
 fn highlight_line_for_ext(line: &str, ext: Option<&str>) -> Vec<Span<'static>> {
     match ext {
         Some("md") | Some("mdx") => highlight_markdown_line(line),
@@ -740,7 +773,17 @@ fn highlight_code_line(line: &str, ext: Option<&str>) -> Vec<Span<'static>> {
     let mut buf = String::new();
     let mut i = 0;
     let chars: Vec<char> = line.chars().collect();
-    let allow_hash_comment = matches!(ext, Some("py") | Some("rb") | Some("sh") | Some("bash") | Some("zsh") | Some("yml") | Some("yaml") | Some("toml"));
+    let allow_hash_comment = matches!(
+        ext,
+        Some("py")
+            | Some("rb")
+            | Some("sh")
+            | Some("bash")
+            | Some("zsh")
+            | Some("yml")
+            | Some("yaml")
+            | Some("toml")
+    );
     let allow_backtick = matches!(ext, Some("js") | Some("ts") | Some("jsx") | Some("tsx"));
 
     while i < chars.len() {

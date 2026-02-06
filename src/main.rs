@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use color_eyre::Result;
 use crossterm::{
-    event::{self, Event, KeyEventKind, EnableMouseCapture, DisableMouseCapture},
+    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind},
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
     ExecutableCommand,
 };
@@ -18,21 +18,21 @@ mod events;
 mod llm;
 mod markdown;
 mod memory;
+mod sandbox;
 mod semantic_search;
 mod session;
-mod sandbox;
 mod theme;
 mod tools;
-mod verify;
 mod types;
 mod ui;
+mod verify;
 
 use app::App;
 use config::AppConfig;
 use events::AppEvent;
-use semantic_search::{SearchConfig, SemanticSearch};
 use memory::MemoryManager;
 use sandbox::SandboxPolicy;
+use semantic_search::{SearchConfig, SemanticSearch};
 use tools::TOOL_NAMES;
 use ui::ui;
 
@@ -54,7 +54,6 @@ fn load_api_key() -> Result<String, String> {
             "OPENROUTER_API_KEY not set. Set it in your shell env, or create ~/.lorikeet/.env with OPENROUTER_API_KEY=...".to_string()
         })
 }
-
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -179,7 +178,9 @@ async fn main() -> Result<()> {
 fn index_file_exists() -> bool {
     let index_dir = SearchConfig::default().index_dir;
     let index_path = index_dir.join("index.bin");
-    std::fs::metadata(index_path).map(|m| m.len() > 0).unwrap_or(false)
+    std::fs::metadata(index_path)
+        .map(|m| m.len() > 0)
+        .unwrap_or(false)
 }
 
 fn print_help() {
@@ -191,11 +192,13 @@ fn print_help() {
     println!("    lorikeet help         Show this help message");
     println!();
     println!("ENVIRONMENT:");
-    println!("    OPENROUTER_API_KEY    API key for OpenRouter (preferred)
+    println!(
+        "    OPENROUTER_API_KEY    API key for OpenRouter (preferred)
     OPENAI_API_KEY         Fallback env var (if set)
 
 NOTES:
-    If installed globally, you can also store OPENROUTER_API_KEY in ~/.lorikeet/.env");
+    If installed globally, you can also store OPENROUTER_API_KEY in ~/.lorikeet/.env"
+    );
 }
 
 async fn run_index_command(args: &[String]) -> Result<()> {
@@ -216,11 +219,7 @@ async fn run_index_command(args: &[String]) -> Result<()> {
     }
 
     let config = AppConfig::load();
-    let sandbox_policy = SandboxPolicy::from_config(
-        config,
-        std::env::current_dir()?,
-        TOOL_NAMES,
-    );
+    let sandbox_policy = SandboxPolicy::from_config(config, std::env::current_dir()?, TOOL_NAMES);
 
     let checked_dir = sandbox_policy
         .check_path_allowed(&dir)

@@ -43,4 +43,3 @@ impl Redactor {
         self.patterns.iter().any(|re| re.is_match(input))
     }
 }
-

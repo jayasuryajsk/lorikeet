@@ -366,7 +366,9 @@ pub async fn call_llm(
                         }
 
                         // Handle reasoning tokens (DeepSeek, o1, etc.)
-                        if let Some(reasoning) = choice.delta.reasoning_content.or(choice.delta.reasoning) {
+                        if let Some(reasoning) =
+                            choice.delta.reasoning_content.or(choice.delta.reasoning)
+                        {
                             let _ = tx.send(AppEvent::AgentReasoning(reasoning));
                         }
 
@@ -428,7 +430,6 @@ pub async fn call_llm(
 
     let _ = tx.send(AppEvent::AgentDone);
 }
-
 
 #[derive(Debug, Deserialize)]
 struct ChatResponse {

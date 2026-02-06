@@ -4,7 +4,9 @@ use std::sync::Arc;
 use rusqlite::{params, Connection, OptionalExtension};
 use tokio::sync::Mutex;
 
-use crate::memory::types::{MatchKind, Memory, MemoryScope, MemorySource, MemoryType, ScoredMemory};
+use crate::memory::types::{
+    MatchKind, Memory, MemoryScope, MemorySource, MemoryType, ScoredMemory,
+};
 use crate::semantic_search::embedder::Embedder;
 
 const DB_FILENAME: &str = "memories.db";
@@ -95,21 +97,28 @@ impl MemoryStore {
         Ok(n > 0)
     }
 
-    pub async fn list(&self, limit: usize, type_filter: Option<MemoryType>) -> anyhow::Result<Vec<Memory>> {
+    pub async fn list(
+        &self,
+        limit: usize,
+        type_filter: Option<MemoryType>,
+    ) -> anyhow::Result<Vec<Memory>> {
         let conn = self.conn.lock().await;
         if let Some(t) = type_filter {
             let mut stmt = conn.prepare(
                 "SELECT * FROM memories WHERE project_id = ?1 AND type = ?2 ORDER BY importance DESC, last_used DESC LIMIT ?3",
             )?;
-            let rows = stmt.query_map(params![self.project_id, t.as_str(), limit as i64], |row| {
-                row_to_memory(row)
-            })?;
+            let rows = stmt
+                .query_map(params![self.project_id, t.as_str(), limit as i64], |row| {
+                    row_to_memory(row)
+                })?;
             Ok(rows.filter_map(|r| r.ok()).collect())
         } else {
             let mut stmt = conn.prepare(
                 "SELECT * FROM memories WHERE project_id = ?1 ORDER BY importance DESC, last_used DESC LIMIT ?2",
             )?;
-            let rows = stmt.query_map(params![self.project_id, limit as i64], |row| row_to_memory(row))?;
+            let rows = stmt.query_map(params![self.project_id, limit as i64], |row| {
+                row_to_memory(row)
+            })?;
             Ok(rows.filter_map(|r| r.ok()).collect())
         }
     }
@@ -141,8 +150,13 @@ impl MemoryStore {
         // Strategy:
         // - If embeddings are available: semantic topK + keyword fallback.
         // - Otherwise: keyword only.
-        let semantic = self.search_semantic(query, limit * 2, type_filter.clone()).await.unwrap_or_default();
-        let keyword = self.search_keyword(query, limit * 2, type_filter.clone()).await?;
+        let semantic = self
+            .search_semantic(query, limit * 2, type_filter.clone())
+            .await
+            .unwrap_or_default();
+        let keyword = self
+            .search_keyword(query, limit * 2, type_filter.clone())
+            .await?;
 
         // Merge by id, keep best score.
         use std::collections::HashMap;
@@ -159,7 +173,11 @@ impl MemoryStore {
         }
 
         let mut out: Vec<ScoredMemory> = merged.into_values().collect();
-        out.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        out.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         out.truncate(limit);
         Ok(out)
     }
@@ -173,7 +191,9 @@ impl MemoryStore {
         let q = format!("%{}%", query);
         let conn = self.conn.lock().await;
 
-        let (sql, params_vec): (String, Vec<rusqlite::types::Value>) = if let Some(types) = type_filter {
+        let (sql, params_vec): (String, Vec<rusqlite::types::Value>) = if let Some(types) =
+            type_filter
+        {
             let mut sql = String::from(
                 "SELECT * FROM memories WHERE project_id = ?1 AND (content LIKE ?2 OR why LIKE ?2 OR context LIKE ?2)",
             );
@@ -237,7 +257,9 @@ impl MemoryStore {
 
         let conn = self.conn.lock().await;
 
-        let (sql, params_vec): (String, Vec<rusqlite::types::Value>) = if let Some(types) = type_filter {
+        let (sql, params_vec): (String, Vec<rusqlite::types::Value>) = if let Some(types) =
+            type_filter
+        {
             let mut sql = String::from("SELECT id, embedding FROM memories WHERE project_id = ?1 AND embedding IS NOT NULL");
             sql.push_str(" AND type IN (");
             for i in 0..types.len() {
@@ -344,7 +366,9 @@ fn row_to_memory(row: &rusqlite::Row<'_>) -> rusqlite::Result<Memory> {
     let last_used: i64 = row.get("last_used")?;
     let source_file: Option<String> = row.get("source_file")?;
 
-    let memory_type: MemoryType = mem_type.parse().map_err(|_| rusqlite::Error::InvalidQuery)?;
+    let memory_type: MemoryType = mem_type
+        .parse()
+        .map_err(|_| rusqlite::Error::InvalidQuery)?;
     let scope: MemoryScope = scope.parse().map_err(|_| rusqlite::Error::InvalidQuery)?;
     let source: MemorySource = match source.as_str() {
         "tool" => MemorySource::Tool,
@@ -372,11 +396,9 @@ fn row_to_memory(row: &rusqlite::Row<'_>) -> rusqlite::Result<Memory> {
 }
 
 fn get_by_id_locked(conn: &Connection, id: &str) -> rusqlite::Result<Option<Memory>> {
-    conn.query_row(
-        "SELECT * FROM memories WHERE id = ?1",
-        params![id],
-        |row| row_to_memory(row),
-    )
+    conn.query_row("SELECT * FROM memories WHERE id = ?1", params![id], |row| {
+        row_to_memory(row)
+    })
     .optional()
 }
 

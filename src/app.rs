@@ -7,16 +7,16 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent,
 use ratatui::prelude::Rect;
 use tokio::sync::mpsc;
 
+use crate::config::AppConfig;
 use crate::events::AppEvent;
 use crate::llm::{call_llm, ChatMessage};
-use crate::semantic_search::{SearchConfig, SemanticSearch};
-use crate::config::AppConfig;
 use crate::memory::MemoryManager;
 use crate::sandbox::SandboxPolicy;
-use crate::tools::execute_tool;
-use crate::verify::detect_suggestions;
+use crate::semantic_search::{SearchConfig, SemanticSearch};
 use crate::session::{replay_into, SessionStore};
+use crate::tools::execute_tool;
 use crate::types::ToolCallMessage;
+use crate::verify::detect_suggestions;
 
 #[derive(Debug, Clone)]
 pub struct Message {
@@ -51,7 +51,11 @@ impl Message {
                     Role::System => "system".into(),
                     Role::Tool => "tool".into(),
                 },
-                content: if self.content.is_empty() { None } else { Some(self.content.clone()) },
+                content: if self.content.is_empty() {
+                    None
+                } else {
+                    Some(self.content.clone())
+                },
                 tool_calls: self.tool_calls.clone(),
                 tool_call_id: None,
                 name: None,
@@ -96,7 +100,11 @@ impl ToolOutput {
     }
 
     pub fn complete(&mut self, success: bool) {
-        self.status = if success { ToolStatus::Success } else { ToolStatus::Error };
+        self.status = if success {
+            ToolStatus::Success
+        } else {
+            ToolStatus::Error
+        };
         self.end_time = Some(Instant::now());
     }
 
@@ -177,7 +185,11 @@ impl ToolOutput {
 
         if total > max_lines {
             let remaining = total - max_lines;
-            result.push(format!("... {} more line{}", remaining, if remaining == 1 { "" } else { "s" }));
+            result.push(format!(
+                "... {} more line{}",
+                remaining,
+                if remaining == 1 { "" } else { "s" }
+            ));
         }
 
         result
@@ -220,8 +232,14 @@ Be concise. Verify your work. If something fails, try a different approach."#;
 #[derive(Debug, Clone)]
 pub enum IndexingStatus {
     NotStarted,
-    Indexing { files_done: usize, total_files: usize },
-    Complete { chunks: usize, files: usize },
+    Indexing {
+        files_done: usize,
+        total_files: usize,
+    },
+    Complete {
+        chunks: usize,
+        files: usize,
+    },
     Error(String),
 }
 
@@ -362,7 +380,6 @@ impl App {
         }
     }
 
-
     pub fn init_session(&mut self, resume: bool) {
         // Decide whether to resume
         if resume {
@@ -437,10 +454,7 @@ impl App {
     }
 
     pub fn new_session(&mut self) {
-        let session_id = format!(
-            "{}",
-            crate::memory::types::unix_ts()
-        );
+        let session_id = format!("{}", crate::memory::types::unix_ts());
         if let Ok(store) = SessionStore::new(&self.workspace_root, session_id) {
             store.init_file();
             self.session = Some(store);
@@ -485,13 +499,16 @@ impl App {
             let tx_for_blocking = tx.clone();
 
             // Run indexing in a blocking task since it's CPU-intensive
-            let result = tokio::task::spawn_blocking(move || {
-                run_background_index(tx_for_blocking, policy)
-            }).await;
+            let result =
+                tokio::task::spawn_blocking(move || run_background_index(tx_for_blocking, policy))
+                    .await;
 
             if let Err(e) = result {
                 // Task panicked
-                let _ = tx.send(AppEvent::IndexingError(format!("Indexing task failed: {}", e)));
+                let _ = tx.send(AppEvent::IndexingError(format!(
+                    "Indexing task failed: {}",
+                    e
+                )));
             }
             // Success/error cases already send events from within run_background_index
         });
@@ -578,7 +595,6 @@ impl App {
         self.start_llm_call();
     }
 
-
     fn start_llm_call(&mut self) {
         self.is_processing = true;
         self.processing_start = Some(Instant::now());
@@ -626,9 +642,7 @@ impl App {
             let mut chat_messages = base_chat_messages;
 
             if inject_memory {
-                let memory_context = memory
-                    .build_injection_context(&user_message, &[])
-                    .await;
+                let memory_context = memory.build_injection_context(&user_message, &[]).await;
 
                 if !memory_context.is_empty() {
                     // Insert right after the first system prompt (if present).
@@ -654,9 +668,6 @@ impl App {
             call_llm(tx, api_key, model, chat_messages).await;
         });
     }
-
-
-
 
     fn scroll_messages_to_bottom(&mut self) {
         self.messages_auto_scroll = true;
@@ -732,23 +743,19 @@ impl App {
                     }
                 }
             }
-            KeyCode::PageUp => {
-                match self.active_pane {
-                    Pane::Chat => {
-                        self.messages_auto_scroll = false;
-                        self.messages_scroll = self.messages_scroll.saturating_sub(20);
-                    }
-                    Pane::Context => {}
+            KeyCode::PageUp => match self.active_pane {
+                Pane::Chat => {
+                    self.messages_auto_scroll = false;
+                    self.messages_scroll = self.messages_scroll.saturating_sub(20);
                 }
-            }
-            KeyCode::PageDown => {
-                match self.active_pane {
-                    Pane::Chat => {
-                        self.messages_scroll = self.messages_scroll.saturating_add(20);
-                    }
-                    Pane::Context => {}
+                Pane::Context => {}
+            },
+            KeyCode::PageDown => match self.active_pane {
+                Pane::Chat => {
+                    self.messages_scroll = self.messages_scroll.saturating_add(20);
                 }
-            }
+                Pane::Context => {}
+            },
             KeyCode::Char('e') => {
                 if self.active_pane == Pane::Chat && self.current_turn_id > 0 {
                     let cur = self
@@ -1287,7 +1294,11 @@ impl App {
                     self.messages.push(Message {
                         role: Role::Agent,
                         content: response,
-                        reasoning: if reasoning.is_empty() { None } else { Some(reasoning) },
+                        reasoning: if reasoning.is_empty() {
+                            None
+                        } else {
+                            Some(reasoning)
+                        },
                         tool_calls: None,
                     });
                     self.scroll_messages_to_bottom();
@@ -1320,18 +1331,20 @@ impl App {
                         .unwrap_or_default()
                 });
 
-                let tool_outputs: Vec<ToolOutput> = if self.turn_tool_start_idx < self.tool_outputs.len() {
-                    self.tool_outputs[self.turn_tool_start_idx..].to_vec()
-                } else {
-                    Vec::new()
-                };
+                let tool_outputs: Vec<ToolOutput> =
+                    if self.turn_tool_start_idx < self.tool_outputs.len() {
+                        self.tool_outputs[self.turn_tool_start_idx..].to_vec()
+                    } else {
+                        Vec::new()
+                    };
                 self.turn_tool_start_idx = self.tool_outputs.len();
 
                 if auto_extract
                     && !user_message.trim().is_empty()
                     && (!response_for_mem.trim().is_empty() || !tool_outputs.is_empty())
                 {
-                    let summary = build_turn_summary(&user_message, &response_for_mem, &tool_outputs);
+                    let summary =
+                        build_turn_summary(&user_message, &response_for_mem, &tool_outputs);
                     let extraction_model = self
                         .config
                         .memory
@@ -1358,7 +1371,11 @@ impl App {
                 self.messages.push(Message {
                     role: Role::Agent,
                     content: response,
-                    reasoning: if reasoning.is_empty() { None } else { Some(reasoning) },
+                    reasoning: if reasoning.is_empty() {
+                        None
+                    } else {
+                        Some(reasoning)
+                    },
                     tool_calls: Some(tool_calls.clone()),
                 });
                 self.scroll_messages_to_bottom();
@@ -1376,28 +1393,45 @@ impl App {
 
                     for tool_call in &tool_calls {
                         let name = tool_call.function.name.as_str();
-                        let args_val: serde_json::Value = match serde_json::from_str(&tool_call.function.arguments) {
-                            Ok(v) => v,
-                            Err(e) => {
-                                tool_results.push((tool_call.id.clone(), format!("Error parsing arguments: {}", e)));
-                                continue;
-                            }
-                        };
+                        let args_val: serde_json::Value =
+                            match serde_json::from_str(&tool_call.function.arguments) {
+                                Ok(v) => v,
+                                Err(e) => {
+                                    tool_results.push((
+                                        tool_call.id.clone(),
+                                        format!("Error parsing arguments: {}", e),
+                                    ));
+                                    continue;
+                                }
+                            };
 
                         let result = match name {
                             "memory_recall" | "memory_save" | "memory_list" | "memory_forget" => {
                                 let _ = tx.send(AppEvent::ToolStart(name.into(), "memory".into()));
                                 let out = match name {
                                     "memory_recall" => {
-                                        let query = args_val.get("query").and_then(|v| v.as_str()).unwrap_or("");
-                                        let limit = args_val.get("limit").and_then(|v| v.as_u64()).unwrap_or(8) as usize;
-                                        let types = args_val.get("types").and_then(|v| v.as_array()).map(|arr| {
-                                            arr.iter()
-                                                .filter_map(|x| x.as_str())
-                                                .filter_map(|s| s.parse().ok())
-                                                .collect::<Vec<crate::memory::MemoryType>>()
-                                        });
-                                        let results = memory.recall(query, limit, types).await.unwrap_or_default();
+                                        let query = args_val
+                                            .get("query")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or("");
+                                        let limit = args_val
+                                            .get("limit")
+                                            .and_then(|v| v.as_u64())
+                                            .unwrap_or(8)
+                                            as usize;
+                                        let types = args_val
+                                            .get("types")
+                                            .and_then(|v| v.as_array())
+                                            .map(|arr| {
+                                                arr.iter()
+                                                    .filter_map(|x| x.as_str())
+                                                    .filter_map(|s| s.parse().ok())
+                                                    .collect::<Vec<crate::memory::MemoryType>>()
+                                            });
+                                        let results = memory
+                                            .recall(query, limit, types)
+                                            .await
+                                            .unwrap_or_default();
                                         if results.is_empty() {
                                             "No memories.".to_string()
                                         } else {
@@ -1423,9 +1457,13 @@ impl App {
                                             .unwrap_or("fact")
                                             .parse::<crate::memory::MemoryType>()
                                             .unwrap_or(crate::memory::MemoryType::Fact);
-                                        let content = args_val.get("content").and_then(|v| v.as_str()).unwrap_or("");
+                                        let content = args_val
+                                            .get("content")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or("");
                                         let why = args_val.get("why").and_then(|v| v.as_str());
-                                        let context = args_val.get("context").and_then(|v| v.as_str());
+                                        let context =
+                                            args_val.get("context").and_then(|v| v.as_str());
                                         let tags = args_val
                                             .get("tags")
                                             .and_then(|v| v.as_array())
@@ -1442,8 +1480,14 @@ impl App {
                                             .unwrap_or("project")
                                             .parse::<crate::memory::MemoryScope>()
                                             .unwrap_or(crate::memory::MemoryScope::Project);
-                                        let confidence = args_val.get("confidence").and_then(|v| v.as_f64()).map(|v| v as f32);
-                                        let importance = args_val.get("importance").and_then(|v| v.as_f64()).map(|v| v as f32);
+                                        let confidence = args_val
+                                            .get("confidence")
+                                            .and_then(|v| v.as_f64())
+                                            .map(|v| v as f32);
+                                        let importance = args_val
+                                            .get("importance")
+                                            .and_then(|v| v.as_f64())
+                                            .map(|v| v as f32);
 
                                         match memory
                                             .save_explicit(
@@ -1460,17 +1504,26 @@ impl App {
                                             )
                                             .await
                                         {
-                                            Ok(mem) => format!("Saved memory {} [{}]", mem.id, mem.memory_type.as_str()),
+                                            Ok(mem) => format!(
+                                                "Saved memory {} [{}]",
+                                                mem.id,
+                                                mem.memory_type.as_str()
+                                            ),
                                             Err(e) => format!("Error: {}", e),
                                         }
                                     }
                                     "memory_list" => {
-                                        let limit = args_val.get("limit").and_then(|v| v.as_u64()).unwrap_or(30) as usize;
-                                        let t = args_val
-                                            .get("type")
-                                            .and_then(|v| v.as_str())
-                                            .and_then(|s| s.parse::<crate::memory::MemoryType>().ok());
-                                        let memories = memory.list(limit, t).await.unwrap_or_default();
+                                        let limit = args_val
+                                            .get("limit")
+                                            .and_then(|v| v.as_u64())
+                                            .unwrap_or(30)
+                                            as usize;
+                                        let t =
+                                            args_val.get("type").and_then(|v| v.as_str()).and_then(
+                                                |s| s.parse::<crate::memory::MemoryType>().ok(),
+                                            );
+                                        let memories =
+                                            memory.list(limit, t).await.unwrap_or_default();
                                         if memories.is_empty() {
                                             "No memories.".to_string()
                                         } else {
@@ -1487,7 +1540,10 @@ impl App {
                                         }
                                     }
                                     "memory_forget" => {
-                                        let id = args_val.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                                        let id = args_val
+                                            .get("id")
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or("");
                                         match memory.forget(id).await {
                                             Ok(true) => format!("Forgot {}", id),
                                             Ok(false) => format!("Not found: {}", id),
@@ -1502,7 +1558,9 @@ impl App {
                                 out
                             }
                             _ => {
-                                let out = execute_tool(name, &tool_call.function.arguments, &tx, &policy).await;
+                                let out =
+                                    execute_tool(name, &tool_call.function.arguments, &tx, &policy)
+                                        .await;
                                 out
                             }
                         };
@@ -1541,7 +1599,8 @@ impl App {
             }
             AppEvent::ToolStart(tool, target) => {
                 let turn_id = self.current_turn_id;
-                self.tool_outputs.push(ToolOutput::new(tool, target, turn_id));
+                self.tool_outputs
+                    .push(ToolOutput::new(tool, target, turn_id));
                 // Always re-expand when a new tool starts (even if the group auto-collapsed earlier).
                 self.tool_group_expanded.insert(turn_id, true);
             }
@@ -1609,10 +1668,16 @@ impl App {
             }
             // Indexing events
             AppEvent::IndexingStarted => {
-                self.indexing_status = IndexingStatus::Indexing { files_done: 0, total_files: 0 };
+                self.indexing_status = IndexingStatus::Indexing {
+                    files_done: 0,
+                    total_files: 0,
+                };
             }
             AppEvent::IndexingProgress(files_done, total_files) => {
-                self.indexing_status = IndexingStatus::Indexing { files_done, total_files };
+                self.indexing_status = IndexingStatus::Indexing {
+                    files_done,
+                    total_files,
+                };
             }
             AppEvent::IndexingComplete(chunks, files) => {
                 self.indexing_status = IndexingStatus::Complete { chunks, files };
@@ -1726,7 +1791,6 @@ fn join_paths(paths: &[PathBuf]) -> String {
         .join(", ")
 }
 
-
 fn build_turn_summary(user_message: &str, agent_response: &str, tools: &[ToolOutput]) -> String {
     let mut out = String::new();
 
@@ -1753,10 +1817,7 @@ fn build_turn_summary(user_message: &str, agent_response: &str, tools: &[ToolOut
             if !t.output.is_empty() {
                 let first = t.output.lines().next().unwrap_or("").trim();
                 if !first.is_empty() {
-                    out.push_str(&format!(
-                        "  Output: {}\n",
-                        truncate_for_summary(first, 180)
-                    ));
+                    out.push_str(&format!("  Output: {}\n", truncate_for_summary(first, 180)));
                 }
             }
         }
@@ -1831,7 +1892,9 @@ fn run_background_index(
 fn index_file_exists() -> bool {
     let index_dir = SearchConfig::default().index_dir;
     let index_path = index_dir.join("index.bin");
-    std::fs::metadata(index_path).map(|m| m.len() > 0).unwrap_or(false)
+    std::fs::metadata(index_path)
+        .map(|m| m.len() > 0)
+        .unwrap_or(false)
 }
 
 fn load_existing_index_status() -> IndexingStatus {

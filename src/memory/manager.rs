@@ -6,7 +6,9 @@ use uuid::Uuid;
 
 use crate::memory::redaction::Redactor;
 use crate::memory::store::MemoryStore;
-use crate::memory::types::{default_importance, Memory, MemoryScope, MemorySource, MemoryType, ScoredMemory};
+use crate::memory::types::{
+    default_importance, Memory, MemoryScope, MemorySource, MemoryType, ScoredMemory,
+};
 
 pub struct MemoryManager {
     store: Arc<MemoryStore>,
@@ -84,16 +86,17 @@ impl MemoryManager {
         type_filter: Option<Vec<MemoryType>>,
     ) -> anyhow::Result<Vec<ScoredMemory>> {
         let results = self.store.search(query, limit, type_filter).await?;
-        let ids: Vec<String> = results
-            .iter()
-            .map(|sm| sm.memory.id.clone())
-            .collect();
+        let ids: Vec<String> = results.iter().map(|sm| sm.memory.id.clone()).collect();
         // Best-effort reinforcement: bump recency/frequency for surfaced memories.
         let _ = self.store.mark_used(&ids).await;
         Ok(results)
     }
 
-    pub async fn list(&self, limit: usize, type_filter: Option<MemoryType>) -> anyhow::Result<Vec<Memory>> {
+    pub async fn list(
+        &self,
+        limit: usize,
+        type_filter: Option<MemoryType>,
+    ) -> anyhow::Result<Vec<Memory>> {
         self.store.list(limit, type_filter).await
     }
 
@@ -172,12 +175,12 @@ impl MemoryManager {
 
         let lower = msg.to_lowercase();
 
-        let starts_no = lower.starts_with("no") || lower.starts_with("nah") || lower.starts_with("nope");
-        let has_avoid = lower.contains("don't") || lower.contains("do not") || lower.contains("never");
-        let has_pref = lower.contains("i prefer")
-            || lower.contains("prefer ")
-            || lower.contains("i want")
-            ;
+        let starts_no =
+            lower.starts_with("no") || lower.starts_with("nah") || lower.starts_with("nope");
+        let has_avoid =
+            lower.contains("don't") || lower.contains("do not") || lower.contains("never");
+        let has_pref =
+            lower.contains("i prefer") || lower.contains("prefer ") || lower.contains("i want");
 
         let mut memory_type: Option<MemoryType> = None;
         let mut why: Option<&'static str> = None;

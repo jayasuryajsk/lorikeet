@@ -90,9 +90,15 @@ fn default_extension_category(ext: &str) -> Option<&'static str> {
 
 fn default_category_style(category: &str) -> Style {
     match category {
-        "directory" => Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-        "hidden" => Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
-        "docs" => Style::default().fg(Color::Green).add_modifier(Modifier::ITALIC),
+        "directory" => Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+        "hidden" => Style::default()
+            .fg(Color::DarkGray)
+            .add_modifier(Modifier::ITALIC),
+        "docs" => Style::default()
+            .fg(Color::Green)
+            .add_modifier(Modifier::ITALIC),
         "config" => Style::default().fg(Color::Magenta),
         "script" => Style::default().fg(Color::Rgb(190, 242, 100)),
         "web" => Style::default().fg(Color::Yellow),

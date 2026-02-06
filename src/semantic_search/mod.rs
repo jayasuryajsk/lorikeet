@@ -133,8 +133,8 @@ impl SemanticSearch {
             metadata.file_path.clone()
         };
 
-        let bytes = std::fs::read(&file_path)
-            .map_err(|e| SemanticSearchError::Io(e.to_string()))?;
+        let bytes =
+            std::fs::read(&file_path).map_err(|e| SemanticSearchError::Io(e.to_string()))?;
         let content = match String::from_utf8(bytes) {
             Ok(s) => s,
             Err(_) => return Ok(String::new()), // Skip non-UTF8 (likely binary)
@@ -179,11 +179,7 @@ impl SemanticSearch {
                 .iter()
                 .map(|c| {
                     // Include file path context for better embeddings
-                    format!(
-                        "File: {}\n\n{}",
-                        c.metadata.file_path.display(),
-                        c.content
-                    )
+                    format!("File: {}\n\n{}", c.metadata.file_path.display(), c.content)
                 })
                 .collect();
 
@@ -250,7 +246,13 @@ impl SemanticSearch {
                     // Check for common excluded directories
                     if matches!(
                         name_str.as_ref(),
-                        "target" | "node_modules" | ".git" | "dist" | "build" | "__pycache__" | "vendor"
+                        "target"
+                            | "node_modules"
+                            | ".git"
+                            | "dist"
+                            | "build"
+                            | "__pycache__"
+                            | "vendor"
                     ) {
                         return true;
                     }
@@ -283,10 +285,7 @@ impl SemanticSearch {
             Err(_) => return Ok(Vec::new()), // Skip non-UTF8 (likely binary) files
         };
 
-        let ext = file_path
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("");
+        let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
         let language = Language::from_extension(ext);
 
         // Make path relative to project root

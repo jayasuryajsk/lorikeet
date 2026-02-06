@@ -97,7 +97,9 @@ fn style_for_state(theme: Theme, state: StyleState) -> Style {
     }
 
     if state.strikethrough {
-        style = style.fg(theme.strikethrough).add_modifier(Modifier::CROSSED_OUT);
+        style = style
+            .fg(theme.strikethrough)
+            .add_modifier(Modifier::CROSSED_OUT);
     }
 
     style
@@ -105,15 +107,19 @@ fn style_for_state(theme: Theme, state: StyleState) -> Style {
 
 // Syntax highlighting colors for code blocks
 fn syntax_color(token: &str, lang: &str) -> Color {
-    let keywords = ["fn", "let", "mut", "const", "if", "else", "match", "for", "while", "loop",
-        "return", "break", "continue", "struct", "enum", "impl", "trait", "pub", "use", "mod",
-        "async", "await", "self", "Self", "true", "false", "None", "Some", "Ok", "Err",
-        "function", "var", "const", "class", "import", "export", "from", "default", "new",
-        "def", "class", "import", "from", "as", "try", "except", "finally", "with", "lambda",
-        "int", "str", "bool", "float", "void", "char", "String", "Vec", "Option", "Result"];
+    let keywords = [
+        "fn", "let", "mut", "const", "if", "else", "match", "for", "while", "loop", "return",
+        "break", "continue", "struct", "enum", "impl", "trait", "pub", "use", "mod", "async",
+        "await", "self", "Self", "true", "false", "None", "Some", "Ok", "Err", "function", "var",
+        "const", "class", "import", "export", "from", "default", "new", "def", "class", "import",
+        "from", "as", "try", "except", "finally", "with", "lambda", "int", "str", "bool", "float",
+        "void", "char", "String", "Vec", "Option", "Result",
+    ];
 
-    let types = ["i32", "i64", "u32", "u64", "f32", "f64", "usize", "isize", "bool", "char",
-        "String", "str", "Vec", "Option", "Result", "Box", "Rc", "Arc", "HashMap", "HashSet"];
+    let types = [
+        "i32", "i64", "u32", "u64", "f32", "f64", "usize", "isize", "bool", "char", "String",
+        "str", "Vec", "Option", "Result", "Box", "Rc", "Arc", "HashMap", "HashSet",
+    ];
 
     if keywords.contains(&token) {
         Color::Magenta
@@ -191,11 +197,17 @@ fn highlight_code(code: &str, lang: &str, theme: Theme) -> Vec<Span<'static>> {
         } else {
             syntax_color(&current, lang)
         };
-        spans.push(Span::styled(current, Style::default().fg(color).bg(theme.code_bg)));
+        spans.push(Span::styled(
+            current,
+            Style::default().fg(color).bg(theme.code_bg),
+        ));
     }
 
     if spans.is_empty() {
-        spans.push(Span::styled(code.to_string(), Style::default().fg(Color::Yellow).bg(theme.code_bg)));
+        spans.push(Span::styled(
+            code.to_string(),
+            Style::default().fg(Color::Yellow).bg(theme.code_bg),
+        ));
     }
 
     spans
@@ -234,10 +246,18 @@ pub fn render(text: &str, theme: Theme, width: usize) -> Vec<Line<'static>> {
         if text.is_empty() {
             return;
         }
-        target.push(Span::styled(text.to_string(), style_for_state(theme, state)));
+        target.push(Span::styled(
+            text.to_string(),
+            style_for_state(theme, state),
+        ));
     };
 
-    let flush_paragraph = |segments: &mut Vec<Vec<Span<'static>>>, out: &mut Vec<Line<'static>>, heading: Option<HeadingLevel>, theme: Theme, width: usize, in_blockquote: bool| {
+    let flush_paragraph = |segments: &mut Vec<Vec<Span<'static>>>,
+                           out: &mut Vec<Line<'static>>,
+                           heading: Option<HeadingLevel>,
+                           theme: Theme,
+                           width: usize,
+                           in_blockquote: bool| {
         let total = segments.len();
         for (idx, seg) in segments.drain(..).enumerate() {
             if seg.is_empty() {
@@ -270,7 +290,12 @@ pub fn render(text: &str, theme: Theme, width: usize) -> Vec<Line<'static>> {
         }
     };
 
-    let flush_list_item = |segments: &mut Vec<Vec<Span<'static>>>, out: &mut Vec<Line<'static>>, list_stack: &mut Vec<(bool, usize)>, theme: Theme, width: usize, in_blockquote: bool| {
+    let flush_list_item = |segments: &mut Vec<Vec<Span<'static>>>,
+                           out: &mut Vec<Line<'static>>,
+                           list_stack: &mut Vec<(bool, usize)>,
+                           theme: Theme,
+                           width: usize,
+                           in_blockquote: bool| {
         if list_stack.is_empty() {
             return;
         }
@@ -356,14 +381,28 @@ pub fn render(text: &str, theme: Theme, width: usize) -> Vec<Line<'static>> {
                     if !current_segment.is_empty() {
                         paragraph_segments.push(std::mem::take(&mut current_segment));
                     }
-                    flush_paragraph(&mut paragraph_segments, &mut lines, heading_level.take(), theme, width, in_blockquote);
+                    flush_paragraph(
+                        &mut paragraph_segments,
+                        &mut lines,
+                        heading_level.take(),
+                        theme,
+                        width,
+                        in_blockquote,
+                    );
                     in_paragraph = false;
                 }
                 TagEnd::Heading(_) => {
                     if !current_segment.is_empty() {
                         paragraph_segments.push(std::mem::take(&mut current_segment));
                     }
-                    flush_paragraph(&mut paragraph_segments, &mut lines, heading_level.take(), theme, width, in_blockquote);
+                    flush_paragraph(
+                        &mut paragraph_segments,
+                        &mut lines,
+                        heading_level.take(),
+                        theme,
+                        width,
+                        in_blockquote,
+                    );
                     in_paragraph = false;
                 }
                 TagEnd::BlockQuote(_) => {
@@ -377,7 +416,14 @@ pub fn render(text: &str, theme: Theme, width: usize) -> Vec<Line<'static>> {
                     if !current_segment.is_empty() {
                         list_item_segments.push(std::mem::take(&mut current_segment));
                     }
-                    flush_list_item(&mut list_item_segments, &mut lines, &mut list_stack, theme, width, in_blockquote);
+                    flush_list_item(
+                        &mut list_item_segments,
+                        &mut lines,
+                        &mut list_stack,
+                        theme,
+                        width,
+                        in_blockquote,
+                    );
                     in_list_item = false;
                 }
                 TagEnd::Emphasis => style_state.italic = false,
@@ -386,9 +432,11 @@ pub fn render(text: &str, theme: Theme, width: usize) -> Vec<Line<'static>> {
                 TagEnd::Link => style_state.link = false,
                 TagEnd::CodeBlock => {
                     for code_line in &code_block_content {
-                        let mut spans = vec![Span::styled("  ", Style::default().bg(theme.code_bg))];
+                        let mut spans =
+                            vec![Span::styled("  ", Style::default().bg(theme.code_bg))];
                         spans.extend(highlight_code(code_line, &code_lang, theme));
-                        let current_len: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+                        let current_len: usize =
+                            spans.iter().map(|s| s.content.chars().count()).sum();
                         if current_len < width.saturating_sub(2) {
                             spans.push(Span::styled(
                                 " ".repeat(width.saturating_sub(current_len + 2)),
@@ -396,7 +444,11 @@ pub fn render(text: &str, theme: Theme, width: usize) -> Vec<Line<'static>> {
                             ));
                         }
                         let line = Line::from(spans);
-                        lines.push(if in_blockquote { style_blockquote_line(line, theme) } else { line });
+                        lines.push(if in_blockquote {
+                            style_blockquote_line(line, theme)
+                        } else {
+                            line
+                        });
                     }
                     code_block_content.clear();
                     code_lang.clear();
@@ -455,10 +507,8 @@ pub fn render(text: &str, theme: Theme, width: usize) -> Vec<Line<'static>> {
             Event::DisplayMath(_) => {}
             Event::TaskListMarker(checked) => {
                 let checkbox = if checked { "☑ " } else { "☐ " };
-                let mut span = Span::styled(
-                    checkbox.to_string(),
-                    Style::default().fg(theme.checkbox),
-                );
+                let mut span =
+                    Span::styled(checkbox.to_string(), Style::default().fg(theme.checkbox));
                 if checked {
                     span.style = span.style.add_modifier(Modifier::CROSSED_OUT);
                 }
@@ -468,7 +518,10 @@ pub fn render(text: &str, theme: Theme, width: usize) -> Vec<Line<'static>> {
     }
 
     if lines.is_empty() {
-        lines.push(Line::from(Span::styled(text.to_string(), Style::default().fg(theme.text))));
+        lines.push(Line::from(Span::styled(
+            text.to_string(),
+            Style::default().fg(theme.text),
+        )));
     }
 
     lines
@@ -493,7 +546,10 @@ fn style_heading_line(line: Line<'static>, level: HeadingLevel, theme: Theme) ->
 }
 
 fn style_blockquote_line(mut line: Line<'static>, theme: Theme) -> Line<'static> {
-    let mut spans = vec![Span::styled("┃ ", Style::default().fg(theme.blockquote_bar))];
+    let mut spans = vec![Span::styled(
+        "┃ ",
+        Style::default().fg(theme.blockquote_bar),
+    )];
     spans.extend(line.spans.into_iter().map(|s| {
         let style = s.style.fg(theme.blockquote).italic();
         Span::styled(s.content.to_string(), style)
@@ -537,7 +593,10 @@ fn render_table(rows: &[Vec<String>], theme: Theme, width: usize, lines: &mut Ve
         }
     }
     top.push('┐');
-    lines.push(Line::from(Span::styled(top, Style::default().fg(theme.table_border))));
+    lines.push(Line::from(Span::styled(
+        top,
+        Style::default().fg(theme.table_border),
+    )));
 
     // Rows
     for (row_idx, row) in rows.iter().enumerate() {
@@ -574,7 +633,10 @@ fn render_table(rows: &[Vec<String>], theme: Theme, width: usize, lines: &mut Ve
                 }
             }
             sep.push('┤');
-            lines.push(Line::from(Span::styled(sep, Style::default().fg(theme.table_border))));
+            lines.push(Line::from(Span::styled(
+                sep,
+                Style::default().fg(theme.table_border),
+            )));
         }
     }
 
@@ -587,10 +649,18 @@ fn render_table(rows: &[Vec<String>], theme: Theme, width: usize, lines: &mut Ve
         }
     }
     bottom.push('┘');
-    lines.push(Line::from(Span::styled(bottom, Style::default().fg(theme.table_border))));
+    lines.push(Line::from(Span::styled(
+        bottom,
+        Style::default().fg(theme.table_border),
+    )));
 }
 
-fn wrap_spans(spans: Vec<Span<'static>>, prefix: Option<&str>, theme: Theme, width: usize) -> Vec<Line<'static>> {
+fn wrap_spans(
+    spans: Vec<Span<'static>>,
+    prefix: Option<&str>,
+    theme: Theme,
+    width: usize,
+) -> Vec<Line<'static>> {
     if width == 0 {
         return vec![Line::from(spans)];
     }

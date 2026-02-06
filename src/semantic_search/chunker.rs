@@ -79,7 +79,8 @@ impl Chunker {
         // Get all top-level definitions
         let content_bytes = content.as_bytes();
         for child in root.children(&mut cursor) {
-            if let Some((symbol_type, symbol_name)) = classify_node(&child, language, content_bytes) {
+            if let Some((symbol_type, symbol_name)) = classify_node(&child, language, content_bytes)
+            {
                 let start_byte = child.start_byte();
                 let end_byte = child.end_byte();
                 let node_content = &content[start_byte..end_byte];
@@ -141,7 +142,8 @@ impl Chunker {
         let mut current_line = base_line;
 
         for line in lines {
-            if current_chunk.len() + line.len() + 1 > self.max_chunk_size && !current_chunk.is_empty()
+            if current_chunk.len() + line.len() + 1 > self.max_chunk_size
+                && !current_chunk.is_empty()
             {
                 chunks.push(CodeChunk {
                     id: *chunk_id,
@@ -186,7 +188,12 @@ impl Chunker {
     }
 
     /// Fall back to line-based chunking
-    fn chunk_by_lines(&self, content: &str, file_path: &Path, language: Language) -> Vec<CodeChunk> {
+    fn chunk_by_lines(
+        &self,
+        content: &str,
+        file_path: &Path,
+        language: Language,
+    ) -> Vec<CodeChunk> {
         let mut chunks = Vec::new();
         let mut chunk_id = 0u64;
         self.chunk_by_lines_into(content, file_path, language, &mut chunks, &mut chunk_id);
@@ -207,7 +214,8 @@ impl Chunker {
         let mut current_line = 1;
 
         for line in lines {
-            if current_chunk.len() + line.len() + 1 > self.max_chunk_size && !current_chunk.is_empty()
+            if current_chunk.len() + line.len() + 1 > self.max_chunk_size
+                && !current_chunk.is_empty()
             {
                 chunks.push(CodeChunk {
                     id: *chunk_id,
@@ -269,7 +277,11 @@ fn get_tree_sitter_language(language: Language) -> Option<TSLanguage> {
 }
 
 /// Classify a tree-sitter node and extract its name
-fn classify_node(node: &tree_sitter::Node, language: Language, content: &[u8]) -> Option<(SymbolType, String)> {
+fn classify_node(
+    node: &tree_sitter::Node,
+    language: Language,
+    content: &[u8],
+) -> Option<(SymbolType, String)> {
     let kind = node.kind();
 
     match language {
@@ -284,7 +296,11 @@ fn classify_node(node: &tree_sitter::Node, language: Language, content: &[u8]) -
     }
 }
 
-fn classify_rust_node(node: &tree_sitter::Node, kind: &str, content: &[u8]) -> Option<(SymbolType, String)> {
+fn classify_rust_node(
+    node: &tree_sitter::Node,
+    kind: &str,
+    content: &[u8],
+) -> Option<(SymbolType, String)> {
     match kind {
         "function_item" => {
             let name = find_child_by_field(node, "name", content)?;
@@ -304,8 +320,8 @@ fn classify_rust_node(node: &tree_sitter::Node, kind: &str, content: &[u8]) -> O
         }
         "impl_item" => {
             // For impl blocks, try to get the type name
-            let name = find_child_by_field(node, "type", content)
-                .or_else(|| Some("impl".to_string()))?;
+            let name =
+                find_child_by_field(node, "type", content).or_else(|| Some("impl".to_string()))?;
             Some((SymbolType::Impl, name))
         }
         "mod_item" => {
@@ -316,7 +332,11 @@ fn classify_rust_node(node: &tree_sitter::Node, kind: &str, content: &[u8]) -> O
     }
 }
 
-fn classify_python_node(node: &tree_sitter::Node, kind: &str, content: &[u8]) -> Option<(SymbolType, String)> {
+fn classify_python_node(
+    node: &tree_sitter::Node,
+    kind: &str,
+    content: &[u8],
+) -> Option<(SymbolType, String)> {
     match kind {
         "function_definition" => {
             let name = find_child_by_field(node, "name", content)?;
@@ -330,7 +350,11 @@ fn classify_python_node(node: &tree_sitter::Node, kind: &str, content: &[u8]) ->
     }
 }
 
-fn classify_js_node(node: &tree_sitter::Node, kind: &str, content: &[u8]) -> Option<(SymbolType, String)> {
+fn classify_js_node(
+    node: &tree_sitter::Node,
+    kind: &str,
+    content: &[u8],
+) -> Option<(SymbolType, String)> {
     match kind {
         "function_declaration" => {
             let name = find_child_by_field(node, "name", content)?;
@@ -360,7 +384,11 @@ fn classify_js_node(node: &tree_sitter::Node, kind: &str, content: &[u8]) -> Opt
     }
 }
 
-fn classify_go_node(node: &tree_sitter::Node, kind: &str, content: &[u8]) -> Option<(SymbolType, String)> {
+fn classify_go_node(
+    node: &tree_sitter::Node,
+    kind: &str,
+    content: &[u8],
+) -> Option<(SymbolType, String)> {
     match kind {
         "function_declaration" => {
             let name = find_child_by_field(node, "name", content)?;
@@ -378,7 +406,11 @@ fn classify_go_node(node: &tree_sitter::Node, kind: &str, content: &[u8]) -> Opt
     }
 }
 
-fn classify_c_cpp_node(node: &tree_sitter::Node, kind: &str, content: &[u8]) -> Option<(SymbolType, String)> {
+fn classify_c_cpp_node(
+    node: &tree_sitter::Node,
+    kind: &str,
+    content: &[u8],
+) -> Option<(SymbolType, String)> {
     match kind {
         "function_definition" => {
             let name = find_child_by_field(node, "declarator", content)
@@ -404,7 +436,11 @@ fn classify_c_cpp_node(node: &tree_sitter::Node, kind: &str, content: &[u8]) -> 
     }
 }
 
-fn classify_java_node(node: &tree_sitter::Node, kind: &str, content: &[u8]) -> Option<(SymbolType, String)> {
+fn classify_java_node(
+    node: &tree_sitter::Node,
+    kind: &str,
+    content: &[u8],
+) -> Option<(SymbolType, String)> {
     match kind {
         "method_declaration" => {
             let name = find_child_by_field(node, "name", content)?;
@@ -426,7 +462,11 @@ fn classify_java_node(node: &tree_sitter::Node, kind: &str, content: &[u8]) -> O
     }
 }
 
-fn classify_ruby_node(node: &tree_sitter::Node, kind: &str, content: &[u8]) -> Option<(SymbolType, String)> {
+fn classify_ruby_node(
+    node: &tree_sitter::Node,
+    kind: &str,
+    content: &[u8],
+) -> Option<(SymbolType, String)> {
     match kind {
         "method" => {
             let name = find_child_by_field(node, "name", content)?;

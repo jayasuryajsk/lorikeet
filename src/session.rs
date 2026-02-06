@@ -137,7 +137,11 @@ impl SessionStore {
     }
 }
 
-pub fn replay_into(events: &[SessionEvent], messages: &mut Vec<Message>, tools: &mut Vec<ToolOutput>) {
+pub fn replay_into(
+    events: &[SessionEvent],
+    messages: &mut Vec<Message>,
+    tools: &mut Vec<ToolOutput>,
+) {
     let mut turn_id: u64 = 0;
     for ev in events {
         match ev {

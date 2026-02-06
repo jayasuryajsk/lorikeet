@@ -109,8 +109,14 @@ pub async fn extract_memories_from_turn(
         out.push(ExtractedMemoryCandidate {
             memory_type,
             content,
-            why: m.why.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()),
-            context: m.context.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()),
+            why: m
+                .why
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty()),
+            context: m
+                .context
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty()),
             tags: m
                 .tags
                 .unwrap_or_default()

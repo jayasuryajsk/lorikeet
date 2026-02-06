@@ -43,9 +43,7 @@ impl SandboxPolicy {
         let enabled = sandbox.enabled.unwrap_or(true);
         let root = sandbox.root.unwrap_or_else(|| workspace_root.clone());
 
-        let allow_paths = sandbox
-            .allow_paths
-            .unwrap_or_else(|| vec![root.clone()]);
+        let allow_paths = sandbox.allow_paths.unwrap_or_else(|| vec![root.clone()]);
 
         let deny_paths = sandbox.deny_paths.unwrap_or_default();
 

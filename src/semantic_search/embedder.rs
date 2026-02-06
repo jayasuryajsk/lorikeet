@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{path::PathBuf, sync::Arc};
 
 use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
 use parking_lot::RwLock;
@@ -8,12 +8,36 @@ pub struct Embedder {
     model: Arc<RwLock<TextEmbedding>>,
 }
 
+fn default_fastembed_cache_dir() -> PathBuf {
+    // Keep it consistent with other Lorikeet user-level state (config/index) under ~/.lorikeet.
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".lorikeet")
+        .join("models")
+        .join("fastembed")
+}
+
 impl Embedder {
     /// Create a new embedder with the AllMiniLML6V2 model
     /// This will download the model on first use (~22MB)
     pub fn new() -> Result<Self, EmbedderError> {
-        let model = TextEmbedding::try_new(InitOptions::new(EmbeddingModel::AllMiniLML6V2))
-            .map_err(|e| EmbedderError::ModelInit(e.to_string()))?;
+        // fastembed defaults to a relative `.fastembed_cache` directory, which causes per-repo
+        // downloads when the CWD changes. Force a global Lorikeet cache dir instead.
+        let cache_dir = default_fastembed_cache_dir();
+        std::fs::create_dir_all(&cache_dir).map_err(|e| {
+            EmbedderError::ModelInit(format!(
+                "Failed to create cache dir {}: {e}",
+                cache_dir.display()
+            ))
+        })?;
+
+        let model = TextEmbedding::try_new(
+            InitOptions::new(EmbeddingModel::AllMiniLML6V2)
+                .with_cache_dir(cache_dir)
+                // Prevent progress bars / file names from writing to stdout/stderr and corrupting the TUI.
+                .with_show_download_progress(false),
+        )
+        .map_err(|e| EmbedderError::ModelInit(e.to_string()))?;
 
         Ok(Self {
             model: Arc::new(RwLock::new(model)),
@@ -48,7 +72,11 @@ impl Embedder {
 
     /// Generate embeddings for code chunks, adding context
     #[allow(dead_code)]
-    pub fn embed_code(&self, code: &str, file_path: Option<&str>) -> Result<Vec<f32>, EmbedderError> {
+    pub fn embed_code(
+        &self,
+        code: &str,
+        file_path: Option<&str>,
+    ) -> Result<Vec<f32>, EmbedderError> {
         // Add file path context to improve search relevance
         let text = match file_path {
             Some(path) => format!("File: {}\n\n{}", path, code),
@@ -82,7 +110,9 @@ pub enum EmbedderError {
 impl std::fmt::Display for EmbedderError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            EmbedderError::ModelInit(msg) => write!(f, "Failed to initialize embedding model: {}", msg),
+            EmbedderError::ModelInit(msg) => {
+                write!(f, "Failed to initialize embedding model: {}", msg)
+            }
             EmbedderError::Embedding(msg) => write!(f, "Embedding error: {}", msg),
         }
     }

@@ -16,7 +16,11 @@ pub fn detect_suggestions(root: &Path) -> Vec<VerifySuggestion> {
     if root.join("Cargo.toml").exists() {
         out.push(s("Run tests", "cargo test", 0.95));
         out.push(s("Format check", "cargo fmt --all -- --check", 0.8));
-        out.push(s("Clippy", "cargo clippy --all-targets --all-features -D warnings", 0.7));
+        out.push(s(
+            "Clippy",
+            "cargo clippy --all-targets --all-features -D warnings",
+            0.7,
+        ));
         return out;
     }
 
@@ -67,20 +71,23 @@ fn detect_node_suggestions(root: &Path) -> Vec<VerifySuggestion> {
         && !scripts.contains_key("typecheck")
         && !scripts.contains_key("build")
     {
-        out.push(s(
-            "Install deps (maybe)",
-            &format!("{} install", pm),
-            0.35,
-        ));
+        out.push(s("Install deps (maybe)", &format!("{} install", pm), 0.35));
     }
 
     // Sort by confidence descending, keep at most 6.
-    out.sort_by(|a, b| b.confidence.partial_cmp(&a.confidence).unwrap_or(std::cmp::Ordering::Equal));
+    out.sort_by(|a, b| {
+        b.confidence
+            .partial_cmp(&a.confidence)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     out.truncate(6);
     out
 }
 
-fn node_script_suggestions(pm: &str, scripts: &std::collections::HashMap<String, String>) -> Vec<VerifySuggestion> {
+fn node_script_suggestions(
+    pm: &str,
+    scripts: &std::collections::HashMap<String, String>,
+) -> Vec<VerifySuggestion> {
     let mut out = Vec::new();
 
     if scripts.contains_key("typecheck") {

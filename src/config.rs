@@ -36,7 +36,6 @@ pub struct ThemeConfig {
     pub file_extensions: Option<HashMap<String, String>>,
 }
 
-
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct MemoryConfig {
     pub enabled: Option<bool>,

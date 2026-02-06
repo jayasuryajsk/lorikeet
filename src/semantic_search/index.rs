@@ -38,8 +38,8 @@ impl VectorIndex {
             dimensions: dimension,
             metric: MetricKind::Cos,
             quantization: ScalarKind::F32,
-            connectivity: 16,    // HNSW M parameter
-            expansion_add: 128,  // ef_construction
+            connectivity: 16,     // HNSW M parameter
+            expansion_add: 128,   // ef_construction
             expansion_search: 64, // ef_search
             ..Default::default()
         };
@@ -47,7 +47,9 @@ impl VectorIndex {
         let index = Index::new(&options).map_err(|e| IndexError::Index(e.to_string()))?;
 
         // Pre-reserve capacity to avoid reallocation issues
-        index.reserve(10000).map_err(|e| IndexError::Index(e.to_string()))?;
+        index
+            .reserve(10000)
+            .map_err(|e| IndexError::Index(e.to_string()))?;
 
         let vi = Self {
             index: RwLock::new(index),
@@ -158,7 +160,11 @@ impl VectorIndex {
     }
 
     /// Search for similar vectors
-    pub fn search(&self, query_embedding: &[f32], top_k: usize) -> Result<Vec<(u64, f32)>, IndexError> {
+    pub fn search(
+        &self,
+        query_embedding: &[f32],
+        top_k: usize,
+    ) -> Result<Vec<(u64, f32)>, IndexError> {
         if query_embedding.len() != self.dimension {
             return Err(IndexError::DimensionMismatch {
                 expected: self.dimension,
@@ -203,8 +209,8 @@ impl VectorIndex {
             metadata: metadata.clone(),
         };
 
-        let serialized = bincode::serialize(&data)
-            .map_err(|e| IndexError::Serialization(e.to_string()))?;
+        let serialized =
+            bincode::serialize(&data).map_err(|e| IndexError::Serialization(e.to_string()))?;
         fs::write(&index_path, serialized).map_err(|e| IndexError::Io(e.to_string()))?;
 
         Ok(())
@@ -252,7 +258,13 @@ impl VectorIndex {
                 // Update next_id
                 {
                     let mut next_id = self.next_id.write();
-                    *next_id = index_data.vectors.iter().map(|(id, _)| *id).max().map(|id| id + 1).unwrap_or(0);
+                    *next_id = index_data
+                        .vectors
+                        .iter()
+                        .map(|(id, _)| *id)
+                        .max()
+                        .map(|id| id + 1)
+                        .unwrap_or(0);
                 }
             }
         }
