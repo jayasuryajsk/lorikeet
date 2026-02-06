@@ -90,7 +90,7 @@ pub fn ui(frame: &mut Frame, app: &mut App) {
                     let text: String = chunk.iter().collect();
                     all_lines.push(Line::from(Span::styled(
                         text,
-                        Style::default().fg(Color::DarkGray).italic(),
+                        Style::default().fg(Color::Rgb(160, 160, 160)),
                     )));
                 }
             }
@@ -162,7 +162,7 @@ pub fn ui(frame: &mut Frame, app: &mut App) {
                     let text: String = chunk.iter().collect();
                     all_lines.push(Line::from(Span::styled(
                         text,
-                        Style::default().fg(Color::DarkGray).italic(),
+                        Style::default().fg(Color::Rgb(160, 160, 160)),
                     )));
                 }
             }
@@ -451,9 +451,16 @@ fn render_turn_tools_inline(
         Span::raw("  "),
         Span::styled(
             format!("{} Tools ({}) ", disclosure, tools.len()),
-            Style::default().fg(Color::DarkGray).bold(),
+            Style::default().fg(Color::Rgb(210, 210, 210)).bold(),
         ),
-        Span::styled(status, Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            status,
+            Style::default().fg(if any_running {
+                Color::Yellow
+            } else {
+                Color::Green
+            }),
+        ),
     ]));
 
     if !expanded {
@@ -522,7 +529,7 @@ fn render_tool_inline(
                 .bold(),
         ),
         Span::styled(display_target, Style::default().fg(Color::Cyan)),
-        Span::styled(elapsed_part, Style::default().fg(Color::DarkGray)),
+        Span::styled(elapsed_part, Style::default().fg(Color::Gray)),
     ]));
 
     if tool.output.is_empty() {
@@ -549,7 +556,10 @@ fn render_tool_inline(
 
     for l in tail {
         let mut spans: Vec<Span<'static>> = Vec::new();
-        spans.push(Span::styled("    │ ", Style::default().fg(Color::DarkGray)));
+        spans.push(Span::styled(
+            "    │ ",
+            Style::default().fg(Color::Rgb(120, 120, 120)),
+        ));
 
         let text = truncate_to_width(l, chat_width.saturating_sub(6));
         if tool.tool == "list_files" {
@@ -561,7 +571,7 @@ fn render_tool_inline(
             let base_style = if tool.status == ToolStatus::Error {
                 Style::default().fg(Color::Red)
             } else {
-                Style::default().fg(Color::Rgb(140, 140, 140))
+                Style::default().fg(Color::Rgb(200, 200, 200))
             };
             spans.push(Span::styled(text, base_style));
         }
@@ -574,7 +584,7 @@ fn render_tool_inline(
             Span::raw("    "),
             Span::styled(
                 format!("… {} more lines", total - k),
-                Style::default().fg(Color::DarkGray).italic(),
+                Style::default().fg(Color::Rgb(160, 160, 160)),
             ),
         ]));
     }
@@ -647,7 +657,7 @@ fn render_context_sidebar(frame: &mut Frame, app: &mut App, area: Rect) {
     if app.recent_files.is_empty() {
         lines.push(Line::from(Span::styled(
             "(none yet)",
-            Style::default().fg(Color::DarkGray).italic(),
+            Style::default().fg(Color::Rgb(160, 160, 160)),
         )));
     } else {
         for p in app.recent_files.iter().take(10) {
@@ -730,7 +740,7 @@ fn highlight_markdown_line(line: &str) -> Vec<Span<'static>> {
     if trimmed.starts_with('>') {
         return vec![Span::styled(
             line.to_string(),
-            Style::default().fg(Color::DarkGray).italic(),
+            Style::default().fg(Color::Rgb(160, 160, 160)),
         )];
     }
 
@@ -801,7 +811,7 @@ fn highlight_code_line(line: &str, ext: Option<&str>) -> Vec<Span<'static>> {
             let rest: String = chars[i..].iter().collect();
             spans.push(Span::styled(
                 rest,
-                Style::default().fg(Color::DarkGray).italic(),
+                Style::default().fg(Color::Rgb(160, 160, 160)),
             ));
             return spans;
         }
@@ -816,7 +826,7 @@ fn highlight_code_line(line: &str, ext: Option<&str>) -> Vec<Span<'static>> {
             let rest: String = chars[i..].iter().collect();
             spans.push(Span::styled(
                 rest,
-                Style::default().fg(Color::DarkGray).italic(),
+                Style::default().fg(Color::Rgb(160, 160, 160)),
             ));
             return spans;
         }
