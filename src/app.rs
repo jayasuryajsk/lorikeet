@@ -886,10 +886,7 @@ impl App {
             KeyCode::Char('e') => {
                 if key.modifiers.contains(KeyModifiers::CONTROL) && self.active_pane == Pane::Chat {
                     if let Some(group_id) = self.last_tool_group_id {
-                        let has_trace = self
-                            .tool_outputs
-                            .iter()
-                            .any(|t| t.group_id == group_id);
+                        let has_trace = self.tool_outputs.iter().any(|t| t.group_id == group_id);
                         if has_trace {
                             let cur = self
                                 .tool_trace_expanded
@@ -907,10 +904,7 @@ impl App {
             KeyCode::Char('i') => {
                 if key.modifiers.contains(KeyModifiers::CONTROL) && self.active_pane == Pane::Chat {
                     if let Some(group_id) = self.last_tool_group_id {
-                        let has_trace = self
-                            .tool_outputs
-                            .iter()
-                            .any(|t| t.group_id == group_id);
+                        let has_trace = self.tool_outputs.iter().any(|t| t.group_id == group_id);
                         if has_trace {
                             let cur = self
                                 .tool_trace_show_details
