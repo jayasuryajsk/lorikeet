@@ -36,14 +36,20 @@ fn get_semantic_search() -> &'static Mutex<Option<SemanticSearch>> {
 pub async fn execute_tool(
     name: &str,
     args: &str,
+    call_id: &str,
     tx: &mpsc::UnboundedSender<AppEvent>,
     policy: &SandboxPolicy,
 ) -> String {
     if let Err(err) = policy.check_tool_allowed(name) {
-        let _ = tx.send(AppEvent::ToolStart(name.into(), "blocked".into()));
         let msg = err.to_string();
-        let _ = tx.send(AppEvent::ToolOutput(msg.clone()));
-        let _ = tx.send(AppEvent::ToolComplete(false));
+        let _ = tx.send(AppEvent::ToolOutput(crate::events::ToolOutputEvent {
+            call_id: call_id.to_string(),
+            chunk: msg.clone(),
+        }));
+        let _ = tx.send(AppEvent::ToolComplete(crate::events::ToolCompleteEvent {
+            call_id: call_id.to_string(),
+            success: false,
+        }));
         return msg;
     }
 
@@ -55,32 +61,51 @@ pub async fn execute_tool(
     match name {
         "memory_recall" | "memory_save" | "memory_list" | "memory_forget" => {
             // Memory tools are handled in App context (need access to MemoryManager).
-            let _ = tx.send(AppEvent::ToolStart(name.into(), "(memory)".into()));
             let msg = "Error: memory tools must be handled by the app".to_string();
-            let _ = tx.send(AppEvent::ToolOutput(msg.clone()));
-            let _ = tx.send(AppEvent::ToolComplete(false));
+            let _ = tx.send(AppEvent::ToolOutput(crate::events::ToolOutputEvent {
+                call_id: call_id.to_string(),
+                chunk: msg.clone(),
+            }));
+            let _ = tx.send(AppEvent::ToolComplete(crate::events::ToolCompleteEvent {
+                call_id: call_id.to_string(),
+                success: false,
+            }));
             msg
         }
         "bash" => {
             let command = args.get("command").and_then(|v| v.as_str()).unwrap_or("");
-            let _ = tx.send(AppEvent::ToolStart("bash".into(), command.into()));
 
             if let Err(err) = policy.check_command_allowed(command) {
                 let msg = err.to_string();
-                let _ = tx.send(AppEvent::ToolOutput(msg.clone()));
-                let _ = tx.send(AppEvent::ToolComplete(false));
+                let _ = tx.send(AppEvent::ToolOutput(crate::events::ToolOutputEvent {
+                    call_id: call_id.to_string(),
+                    chunk: msg.clone(),
+                }));
+                let _ = tx.send(AppEvent::ToolComplete(crate::events::ToolCompleteEvent {
+                    call_id: call_id.to_string(),
+                    success: false,
+                }));
                 return msg;
             }
 
-            if let Err(err) = check_bash_paths(policy, command) {
+            if let Err(err) = policy.check_bash_paths(command) {
                 let msg = err.to_string();
-                let _ = tx.send(AppEvent::ToolOutput(msg.clone()));
-                let _ = tx.send(AppEvent::ToolComplete(false));
+                let _ = tx.send(AppEvent::ToolOutput(crate::events::ToolOutputEvent {
+                    call_id: call_id.to_string(),
+                    chunk: msg.clone(),
+                }));
+                let _ = tx.send(AppEvent::ToolComplete(crate::events::ToolCompleteEvent {
+                    call_id: call_id.to_string(),
+                    success: false,
+                }));
                 return msg;
             }
 
-            let (result, success) = execute_bash_streaming(command, tx.clone()).await;
-            let _ = tx.send(AppEvent::ToolComplete(success));
+            let (result, success) = execute_bash_streaming(command, call_id, tx.clone()).await;
+            let _ = tx.send(AppEvent::ToolComplete(crate::events::ToolCompleteEvent {
+                call_id: call_id.to_string(),
+                success,
+            }));
             result
         }
         "rg" => {
@@ -96,34 +121,50 @@ pub async fn execute_tool(
             } else {
                 format!("{} in {}", query, path)
             };
-            let _ = tx.send(AppEvent::ToolStart("rg".into(), display));
 
             let checked_path = match policy.check_path_allowed(Path::new(path)) {
                 Ok(p) => p,
                 Err(err) => {
                     let msg = err.to_string();
-                    let _ = tx.send(AppEvent::ToolOutput(msg.clone()));
-                    let _ = tx.send(AppEvent::ToolComplete(false));
+                    let _ = tx.send(AppEvent::ToolOutput(crate::events::ToolOutputEvent {
+                        call_id: call_id.to_string(),
+                        chunk: msg.clone(),
+                    }));
+                    let _ = tx.send(AppEvent::ToolComplete(crate::events::ToolCompleteEvent {
+                        call_id: call_id.to_string(),
+                        success: false,
+                    }));
                     return msg;
                 }
             };
 
             let result = execute_rg(query, checked_path.to_string_lossy().as_ref(), context).await;
             let success = !result.starts_with("Error:");
-            let _ = tx.send(AppEvent::ToolOutput(result.clone()));
-            let _ = tx.send(AppEvent::ToolComplete(success));
+            let _ = tx.send(AppEvent::ToolOutput(crate::events::ToolOutputEvent {
+                call_id: call_id.to_string(),
+                chunk: result.clone(),
+            }));
+            let _ = tx.send(AppEvent::ToolComplete(crate::events::ToolCompleteEvent {
+                call_id: call_id.to_string(),
+                success,
+            }));
             result
         }
         "read_file" => {
             let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
-            let _ = tx.send(AppEvent::ToolStart("read_file".into(), path.into()));
 
             let checked_path = match policy.check_path_allowed(Path::new(path)) {
                 Ok(p) => p,
                 Err(err) => {
                     let msg = err.to_string();
-                    let _ = tx.send(AppEvent::ToolOutput(msg.clone()));
-                    let _ = tx.send(AppEvent::ToolComplete(false));
+                    let _ = tx.send(AppEvent::ToolOutput(crate::events::ToolOutputEvent {
+                        call_id: call_id.to_string(),
+                        chunk: msg.clone(),
+                    }));
+                    let _ = tx.send(AppEvent::ToolComplete(crate::events::ToolCompleteEvent {
+                        call_id: call_id.to_string(),
+                        success: false,
+                    }));
                     return msg;
                 }
             };
@@ -133,21 +174,32 @@ pub async fn execute_tool(
                 Err(e) => format!("Error reading file: {}", e),
             };
             let success = !result.starts_with("Error");
-            let _ = tx.send(AppEvent::ToolOutput(result.clone()));
-            let _ = tx.send(AppEvent::ToolComplete(success));
+            let _ = tx.send(AppEvent::ToolOutput(crate::events::ToolOutputEvent {
+                call_id: call_id.to_string(),
+                chunk: result.clone(),
+            }));
+            let _ = tx.send(AppEvent::ToolComplete(crate::events::ToolCompleteEvent {
+                call_id: call_id.to_string(),
+                success,
+            }));
             result
         }
         "write_file" => {
             let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
             let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
-            let _ = tx.send(AppEvent::ToolStart("write_file".into(), path.into()));
 
             let checked_path = match policy.check_path_allowed(Path::new(path)) {
                 Ok(p) => p,
                 Err(err) => {
                     let msg = err.to_string();
-                    let _ = tx.send(AppEvent::ToolOutput(msg.clone()));
-                    let _ = tx.send(AppEvent::ToolComplete(false));
+                    let _ = tx.send(AppEvent::ToolOutput(crate::events::ToolOutputEvent {
+                        call_id: call_id.to_string(),
+                        chunk: msg.clone(),
+                    }));
+                    let _ = tx.send(AppEvent::ToolComplete(crate::events::ToolCompleteEvent {
+                        call_id: call_id.to_string(),
+                        success: false,
+                    }));
                     return msg;
                 }
             };
@@ -157,20 +209,31 @@ pub async fn execute_tool(
                 Err(e) => format!("Error writing file: {}", e),
             };
             let success = !result.starts_with("Error");
-            let _ = tx.send(AppEvent::ToolOutput(result.clone()));
-            let _ = tx.send(AppEvent::ToolComplete(success));
+            let _ = tx.send(AppEvent::ToolOutput(crate::events::ToolOutputEvent {
+                call_id: call_id.to_string(),
+                chunk: result.clone(),
+            }));
+            let _ = tx.send(AppEvent::ToolComplete(crate::events::ToolCompleteEvent {
+                call_id: call_id.to_string(),
+                success,
+            }));
             result
         }
         "list_files" => {
             let path = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
-            let _ = tx.send(AppEvent::ToolStart("list_files".into(), path.into()));
 
             let checked_path = match policy.check_path_allowed(Path::new(path)) {
                 Ok(p) => p,
                 Err(err) => {
                     let msg = err.to_string();
-                    let _ = tx.send(AppEvent::ToolOutput(msg.clone()));
-                    let _ = tx.send(AppEvent::ToolComplete(false));
+                    let _ = tx.send(AppEvent::ToolOutput(crate::events::ToolOutputEvent {
+                        call_id: call_id.to_string(),
+                        chunk: msg.clone(),
+                    }));
+                    let _ = tx.send(AppEvent::ToolComplete(crate::events::ToolCompleteEvent {
+                        call_id: call_id.to_string(),
+                        success: false,
+                    }));
                     return msg;
                 }
             };
@@ -189,8 +252,14 @@ pub async fn execute_tool(
                 Err(e) => format!("Error listing directory: {}", e),
             };
             let success = !result.starts_with("Error");
-            let _ = tx.send(AppEvent::ToolOutput(result.clone()));
-            let _ = tx.send(AppEvent::ToolComplete(success));
+            let _ = tx.send(AppEvent::ToolOutput(crate::events::ToolOutputEvent {
+                call_id: call_id.to_string(),
+                chunk: result.clone(),
+            }));
+            let _ = tx.send(AppEvent::ToolComplete(crate::events::ToolCompleteEvent {
+                call_id: call_id.to_string(),
+                success,
+            }));
             result
         }
         "edit_file" => {
@@ -209,22 +278,33 @@ pub async fn execute_tool(
             } else {
                 format!("{}", path)
             };
-            let _ = tx.send(AppEvent::ToolStart("edit_file".into(), display));
 
             let checked_path = match policy.check_path_allowed(Path::new(path)) {
                 Ok(p) => p,
                 Err(err) => {
                     let msg = err.to_string();
-                    let _ = tx.send(AppEvent::ToolOutput(msg.clone()));
-                    let _ = tx.send(AppEvent::ToolComplete(false));
+                    let _ = tx.send(AppEvent::ToolOutput(crate::events::ToolOutputEvent {
+                        call_id: call_id.to_string(),
+                        chunk: msg.clone(),
+                    }));
+                    let _ = tx.send(AppEvent::ToolComplete(crate::events::ToolCompleteEvent {
+                        call_id: call_id.to_string(),
+                        success: false,
+                    }));
                     return msg;
                 }
             };
 
             let result = edit_file(&checked_path, old_str, new_str).await;
             let success = !result.starts_with("Error");
-            let _ = tx.send(AppEvent::ToolOutput(result.clone()));
-            let _ = tx.send(AppEvent::ToolComplete(success));
+            let _ = tx.send(AppEvent::ToolOutput(crate::events::ToolOutputEvent {
+                call_id: call_id.to_string(),
+                chunk: result.clone(),
+            }));
+            let _ = tx.send(AppEvent::ToolComplete(crate::events::ToolCompleteEvent {
+                call_id: call_id.to_string(),
+                success,
+            }));
             result
         }
         "semantic_search" => {
@@ -234,12 +314,17 @@ pub async fn execute_tool(
             } else {
                 query.to_string()
             };
-            let _ = tx.send(AppEvent::ToolStart("semantic_search".into(), display));
 
             let result = execute_semantic_search(query, policy).await;
             let success = !result.starts_with("Error");
-            let _ = tx.send(AppEvent::ToolOutput(result.clone()));
-            let _ = tx.send(AppEvent::ToolComplete(success));
+            let _ = tx.send(AppEvent::ToolOutput(crate::events::ToolOutputEvent {
+                call_id: call_id.to_string(),
+                chunk: result.clone(),
+            }));
+            let _ = tx.send(AppEvent::ToolComplete(crate::events::ToolCompleteEvent {
+                call_id: call_id.to_string(),
+                success,
+            }));
             result
         }
         _ => format!("Unknown tool: {}", name),
@@ -248,6 +333,7 @@ pub async fn execute_tool(
 
 async fn execute_bash_streaming(
     command: &str,
+    call_id: &str,
     tx: mpsc::UnboundedSender<AppEvent>,
 ) -> (String, bool) {
     // Tool results are fed back into the model, so we aggregate output.
@@ -290,6 +376,8 @@ async fn execute_bash_streaming(
 
     let acc = std::sync::Arc::new(tokio::sync::Mutex::new(OutputAcc::default()));
 
+    let call_id_owned = call_id.to_string();
+
     let mut child = match Command::new("bash")
         .arg("-c")
         .arg(command)
@@ -306,6 +394,7 @@ async fn execute_bash_streaming(
 
     async fn stream_lossy<R: tokio::io::AsyncRead + Unpin>(
         r: R,
+        call_id: String,
         tx: mpsc::UnboundedSender<AppEvent>,
         prefix: &'static str,
         acc: std::sync::Arc<tokio::sync::Mutex<OutputAcc>>,
@@ -325,7 +414,10 @@ async fn execute_bash_streaming(
                         format!("{}{}", prefix, s)
                     };
 
-                    let _ = tx.send(AppEvent::ToolOutput(chunk.clone()));
+                    let _ = tx.send(AppEvent::ToolOutput(crate::events::ToolOutputEvent {
+                        call_id: call_id.to_string(),
+                        chunk: chunk.clone(),
+                    }));
 
                     let mut guard = acc.lock().await;
                     guard.push_line(chunk);
@@ -338,7 +430,13 @@ async fn execute_bash_streaming(
     let stdout_task = if let Some(out) = stdout {
         let tx2 = tx.clone();
         let acc2 = acc.clone();
-        Some(tokio::spawn(stream_lossy(out, tx2, "", acc2)))
+        Some(tokio::spawn(stream_lossy(
+            out,
+            call_id_owned.clone(),
+            tx2,
+            "",
+            acc2,
+        )))
     } else {
         None
     };
@@ -346,7 +444,13 @@ async fn execute_bash_streaming(
     let stderr_task = if let Some(err) = stderr {
         let tx2 = tx.clone();
         let acc2 = acc.clone();
-        Some(tokio::spawn(stream_lossy(err, tx2, "[stderr] ", acc2)))
+        Some(tokio::spawn(stream_lossy(
+            err,
+            call_id_owned.clone(),
+            tx2,
+            "[stderr] ",
+            acc2,
+        )))
     } else {
         None
     };
@@ -356,14 +460,20 @@ async fn execute_bash_streaming(
         Ok(Ok(status)) => (status.success(), status.code().unwrap_or(-1)),
         Ok(Err(e)) => {
             let msg = format!("Error executing command: {}\n", e);
-            let _ = tx.send(AppEvent::ToolOutput(msg.clone()));
+            let _ = tx.send(AppEvent::ToolOutput(crate::events::ToolOutputEvent {
+                call_id: call_id.to_string(),
+                chunk: msg.clone(),
+            }));
             let mut guard = acc.lock().await;
             guard.push_line(msg);
             (false, -1)
         }
         Err(_) => {
             let msg = format!("Error: Command timed out after {} seconds\n", TIMEOUT_SECS);
-            let _ = tx.send(AppEvent::ToolOutput(msg.clone()));
+            let _ = tx.send(AppEvent::ToolOutput(crate::events::ToolOutputEvent {
+                call_id: call_id.to_string(),
+                chunk: msg.clone(),
+            }));
             let mut guard = acc.lock().await;
             guard.push_line(msg);
             let _ = child.start_kill();
@@ -382,7 +492,10 @@ async fn execute_bash_streaming(
 
     // Add an exit marker to both the UI stream and the model-visible tool result.
     let exit_line = format!("[exit] {}\n", code);
-    let _ = tx.send(AppEvent::ToolOutput(exit_line.clone()));
+    let _ = tx.send(AppEvent::ToolOutput(crate::events::ToolOutputEvent {
+        call_id: call_id.to_string(),
+        chunk: exit_line.clone(),
+    }));
     {
         let mut guard = acc.lock().await;
         guard.push_line(exit_line);
@@ -589,30 +702,4 @@ async fn edit_file(path: &Path, old_string: &str, new_string: &str) -> String {
         }
         Err(e) => format!("Error writing file: {}", e),
     }
-}
-
-fn check_bash_paths(
-    policy: &SandboxPolicy,
-    command: &str,
-) -> Result<(), crate::sandbox::SandboxError> {
-    let mut parts = command.split_whitespace();
-    let _exec = parts.next();
-
-    for part in parts {
-        if part.starts_with('-') && !part.contains('/') {
-            continue;
-        }
-        if looks_like_path(part) {
-            let path = Path::new(part.trim_matches('"').trim_matches('\''));
-            let _ = policy.check_path_allowed(path)?;
-        }
-    }
-    Ok(())
-}
-
-fn looks_like_path(token: &str) -> bool {
-    token.starts_with('/')
-        || token.starts_with("./")
-        || token.starts_with("../")
-        || token.contains('/')
 }

@@ -140,7 +140,7 @@ pub fn ui(frame: &mut Frame, app: &mut App) {
         // Inline tools group: render immediately after each user message.
         if msg.role == Role::User {
             turn_id = turn_id.saturating_add(1);
-            render_turn_tools_inline(app, turn_id, tool_spinner, chat_width, &mut all_lines);
+            render_turn_tools_inline(&*app, turn_id, tool_spinner, chat_width, &mut all_lines);
         }
     }
 
@@ -296,7 +296,13 @@ pub fn ui(frame: &mut Frame, app: &mut App) {
         " ESC quit │ TAB switch │ CTRL+←/→ resize │ SHIFT+↑↓ scroll │ PgUp/PgDn │ ENTER send"
             .to_string();
     if app.current_turn_id > 0 {
-        status_text.push_str(" │ e tools");
+        let has_trace = app
+            .tool_outputs
+            .iter()
+            .any(|t| t.turn_id == app.current_turn_id);
+        if has_trace {
+            status_text.push_str(" │ e trace │ i details");
+        }
     }
     if !app.verify_suggestions.is_empty() {
         let hint = app
@@ -417,17 +423,16 @@ fn render_settings_popup(frame: &mut Frame, app: &mut App) {
 }
 
 fn render_turn_tools_inline(
-    app: &mut App,
+    app: &App,
     turn_id: u64,
     tool_spinner: &str,
     chat_width: usize,
     out: &mut Vec<Line<'static>>,
 ) {
-    let tools: Vec<ToolOutput> = app
+    let tools: Vec<&ToolOutput> = app
         .tool_outputs
         .iter()
         .filter(|t| t.turn_id == turn_id)
-        .cloned()
         .collect();
     if tools.is_empty() {
         return;
@@ -439,6 +444,11 @@ fn render_turn_tools_inline(
         .get(&turn_id)
         .copied()
         .unwrap_or(any_running);
+    let show_details = app
+        .tool_group_show_details
+        .get(&turn_id)
+        .copied()
+        .unwrap_or(true);
 
     let disclosure = if expanded { "▾" } else { "▸" };
     let status = if any_running {
@@ -450,7 +460,7 @@ fn render_turn_tools_inline(
     out.push(Line::from(vec![
         Span::raw("  "),
         Span::styled(
-            format!("{} Tools ({}) ", disclosure, tools.len()),
+            format!("{} Tool Trace ({}) ", disclosure, tools.len()),
             Style::default().fg(Color::Rgb(210, 210, 210)).bold(),
         ),
         Span::styled(
@@ -463,21 +473,26 @@ fn render_turn_tools_inline(
         ),
     ]));
 
-    if !expanded {
-        out.push(Line::from(""));
-        return;
-    }
-
-    for t in &tools {
-        render_tool_inline(app, t, tool_spinner, chat_width, out);
+    for t in tools {
+        render_tool_trace_item(
+            app,
+            t,
+            expanded,
+            show_details,
+            tool_spinner,
+            chat_width,
+            out,
+        );
     }
 
     out.push(Line::from(""));
 }
 
-fn render_tool_inline(
-    app: &mut App,
+fn render_tool_trace_item(
+    app: &App,
     tool: &ToolOutput,
+    group_expanded: bool,
+    show_details: bool,
     tool_spinner: &str,
     chat_width: usize,
     out: &mut Vec<Line<'static>>,
@@ -501,15 +516,18 @@ fn render_tool_inline(
         format!("{}ms", elapsed.as_millis())
     };
 
-    let icon = tool.icon();
-    let action = tool.action_verb();
+    let cwd_display = tool.cwd.file_name().and_then(|s| s.to_str()).unwrap_or(".");
 
-    let prefix = format!("  {} {} {} ", status_indicator, icon, action);
+    let suffix = format!(
+        " [id={}] (cwd={}) ({})",
+        tool.call_id, cwd_display, elapsed_str
+    );
+    let prefix = format!("  {} {}  ", status_indicator, tool.tool);
+
     let prefix_w = UnicodeWidthStr::width(prefix.as_str());
-    let elapsed_part = format!(" ({})", elapsed_str);
-    let elapsed_w = UnicodeWidthStr::width(elapsed_part.as_str());
-    let available = chat_width.saturating_sub(prefix_w + elapsed_w);
-    let display_target = truncate_to_width(&tool.target, available);
+    let suffix_w = UnicodeWidthStr::width(suffix.as_str());
+    let available = chat_width.saturating_sub(prefix_w + suffix_w);
+    let args = truncate_to_width(&tool.args_summary, available);
 
     out.push(Line::from(vec![
         Span::raw("  "),
@@ -517,9 +535,8 @@ fn render_tool_inline(
             format!("{} ", status_indicator),
             Style::default().fg(status_color),
         ),
-        Span::raw(format!("{} ", icon)),
         Span::styled(
-            format!("{} ", action),
+            format!("{} ", tool.tool),
             Style::default()
                 .fg(match tool.status {
                     ToolStatus::Running => Color::Yellow,
@@ -528,23 +545,83 @@ fn render_tool_inline(
                 })
                 .bold(),
         ),
-        Span::styled(display_target, Style::default().fg(Color::Cyan)),
-        Span::styled(elapsed_part, Style::default().fg(Color::Gray)),
+        Span::styled(args, Style::default().fg(Color::Rgb(220, 220, 220))),
+        Span::styled(suffix, Style::default().fg(Color::Rgb(160, 160, 160))),
     ]));
 
-    if tool.output.is_empty() {
+    let want_details = (group_expanded && show_details) || tool.status == ToolStatus::Error;
+    if want_details {
+        let (label, style) = if tool.sandbox.allowed {
+            ("allow".to_string(), Style::default().fg(Color::Green))
+        } else {
+            (
+                format!(
+                    "deny{}",
+                    tool.sandbox
+                        .reason
+                        .as_ref()
+                        .map(|r| format!(
+                            " ({})",
+                            truncate_to_width(r, chat_width.saturating_sub(14))
+                        ))
+                        .unwrap_or_default()
+                ),
+                Style::default().fg(Color::Red),
+            )
+        };
+
+        out.push(Line::from(vec![
+            Span::raw("  └ sandbox: "),
+            Span::styled(label, style),
+        ]));
+
+        // Input JSON (redacted + pretty-printed at capture time)
+        const MAX_INPUT_LINES: usize = 8;
+        if !tool.args_pretty_lines.is_empty() {
+            out.push(Line::from(vec![
+                Span::raw("  └ input: "),
+                Span::styled("{", Style::default().fg(Color::Rgb(160, 160, 160))),
+            ]));
+            for l in tool.args_pretty_lines.iter().take(MAX_INPUT_LINES) {
+                out.push(Line::from(vec![
+                    Span::raw("    "),
+                    Span::styled(
+                        truncate_to_width(l, chat_width.saturating_sub(4)),
+                        Style::default().fg(Color::Rgb(160, 160, 160)),
+                    ),
+                ]));
+            }
+            if tool.args_pretty_lines.len() > MAX_INPUT_LINES {
+                out.push(Line::from(vec![
+                    Span::raw("    "),
+                    Span::styled(
+                        format!(
+                            "… {} more lines",
+                            tool.args_pretty_lines.len() - MAX_INPUT_LINES
+                        ),
+                        Style::default().fg(Color::Rgb(160, 160, 160)),
+                    ),
+                ]));
+            }
+        }
+    }
+
+    if tool.output.is_empty() && tool.output_lines.is_empty() {
         return;
     }
 
-    let lines: Vec<&str> = tool.output.lines().collect();
-    let total = lines.len();
     let k = if tool.status == ToolStatus::Running {
         8
-    } else {
+    } else if group_expanded {
         20
+    } else {
+        2
     };
-    let start = total.saturating_sub(k);
-    let tail = &lines[start..];
+
+    let (tail, remaining) = tool.tail_lines(k);
+    if tail.is_empty() {
+        return;
+    }
 
     let ext = if tool.tool == "read_file" {
         std::path::Path::new(&tool.target)
@@ -554,14 +631,17 @@ fn render_tool_inline(
         None
     };
 
-    for l in tail {
+    for (i, l) in tail.iter().enumerate() {
+        let is_first = i == 0;
+        let prefix = if is_first { "  └ out: " } else { "        " };
+
         let mut spans: Vec<Span<'static>> = Vec::new();
         spans.push(Span::styled(
-            "    │ ",
+            prefix,
             Style::default().fg(Color::Rgb(120, 120, 120)),
         ));
 
-        let text = truncate_to_width(l, chat_width.saturating_sub(6));
+        let text = truncate_to_width(l, chat_width.saturating_sub(prefix.len()));
         if tool.tool == "list_files" {
             let style = theme::style_for_filename(&text, &app.config);
             spans.push(Span::styled(text, style));
@@ -579,11 +659,11 @@ fn render_tool_inline(
         out.push(Line::from(spans));
     }
 
-    if total > k {
+    if remaining > 0 || tool.output_is_truncated() {
         out.push(Line::from(vec![
-            Span::raw("    "),
+            Span::raw("        "),
             Span::styled(
-                format!("… {} more lines", total - k),
+                format!("… {} more lines", remaining),
                 Style::default().fg(Color::Rgb(160, 160, 160)),
             ),
         ]));

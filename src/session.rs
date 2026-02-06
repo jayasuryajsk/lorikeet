@@ -23,6 +23,17 @@ pub enum SessionEvent {
         output: String,
         status: String,
         elapsed_ms: u128,
+
+        #[serde(default)]
+        call_id: Option<String>,
+        #[serde(default)]
+        args_raw: Option<String>,
+        #[serde(default)]
+        cwd: Option<String>,
+        #[serde(default)]
+        sandbox_allowed: Option<bool>,
+        #[serde(default)]
+        sandbox_reason: Option<String>,
     },
     Meta {
         ts: i64,
@@ -118,6 +129,12 @@ impl SessionStore {
             output: tool.output.clone(),
             status: tool_status_to_string(tool.status),
             elapsed_ms: tool.elapsed().as_millis(),
+
+            call_id: Some(tool.call_id.clone()),
+            args_raw: Some(tool.args_raw.clone()),
+            cwd: Some(tool.cwd.display().to_string()),
+            sandbox_allowed: Some(tool.sandbox.allowed),
+            sandbox_reason: tool.sandbox.reason.clone(),
         });
     }
 
@@ -166,9 +183,33 @@ pub fn replay_into(
                 target,
                 output,
                 status,
+                call_id,
+                args_raw,
+                cwd,
+                sandbox_allowed,
+                sandbox_reason,
                 ..
             } => {
-                let mut t = ToolOutput::new(tool.clone(), target.clone(), turn_id);
+                let call_id = call_id.clone().unwrap_or_else(|| "<legacy>".to_string());
+                let args_raw = args_raw.clone().unwrap_or_default();
+                let cwd_path = cwd
+                    .as_ref()
+                    .map(|s| std::path::PathBuf::from(s))
+                    .unwrap_or_else(|| std::path::PathBuf::from("."));
+                let sandbox = crate::sandbox::SandboxDecision {
+                    allowed: sandbox_allowed.unwrap_or(true),
+                    reason: sandbox_reason.clone(),
+                };
+
+                let mut t = ToolOutput::new(
+                    call_id,
+                    tool.clone(),
+                    args_raw,
+                    target.clone(),
+                    cwd_path,
+                    sandbox,
+                    turn_id,
+                );
                 t.set_output(output.clone());
                 let success = status.eq_ignore_ascii_case("success");
                 t.complete(success);
@@ -209,6 +250,11 @@ mod tests {
                 output: "1".into(),
                 status: "success".into(),
                 elapsed_ms: 1,
+                call_id: None,
+                args_raw: None,
+                cwd: None,
+                sandbox_allowed: None,
+                sandbox_reason: None,
             },
             SessionEvent::Message {
                 ts: 0,
@@ -223,6 +269,11 @@ mod tests {
                 output: "2".into(),
                 status: "success".into(),
                 elapsed_ms: 1,
+                call_id: None,
+                args_raw: None,
+                cwd: None,
+                sandbox_allowed: None,
+                sandbox_reason: None,
             },
         ];
 
@@ -233,6 +284,41 @@ mod tests {
         assert_eq!(tools.len(), 2);
         assert_eq!(tools[0].turn_id, 1);
         assert_eq!(tools[1].turn_id, 2);
+    }
+
+    #[test]
+    fn session_replay_restores_tool_invocation_metadata() {
+        let events = vec![
+            SessionEvent::Message {
+                ts: 0,
+                role: "user".into(),
+                content: "hi".into(),
+                reasoning: None,
+            },
+            SessionEvent::Tool {
+                ts: 0,
+                tool: "bash".into(),
+                target: "echo 1".into(),
+                output: "1".into(),
+                status: "success".into(),
+                elapsed_ms: 1,
+                call_id: Some("call-a".into()),
+                args_raw: Some(r#"{"command":"echo 1"}"#.into()),
+                cwd: Some("/tmp".into()),
+                sandbox_allowed: Some(true),
+                sandbox_reason: None,
+            },
+        ];
+
+        let mut messages = Vec::new();
+        let mut tools = Vec::new();
+        replay_into(&events, &mut messages, &mut tools);
+
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].call_id, "call-a");
+        assert!(tools[0].args_raw.contains("echo 1"));
+        assert_eq!(tools[0].cwd.to_string_lossy(), "/tmp");
+        assert!(tools[0].sandbox.allowed);
     }
 }
 

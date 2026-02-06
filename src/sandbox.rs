@@ -20,6 +20,28 @@ pub enum SandboxError {
     CommandNotAllowed(String),
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct SandboxDecision {
+    pub allowed: bool,
+    pub reason: Option<String>,
+}
+
+impl SandboxDecision {
+    pub fn allow() -> Self {
+        Self {
+            allowed: true,
+            reason: None,
+        }
+    }
+
+    pub fn deny(reason: impl Into<String>) -> Self {
+        Self {
+            allowed: false,
+            reason: Some(reason.into()),
+        }
+    }
+}
+
 impl std::fmt::Display for SandboxError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -120,6 +142,28 @@ impl SandboxPolicy {
             Err(SandboxError::CommandNotAllowed(executable.to_string()))
         }
     }
+
+    // Best-effort path allow/deny checks for shell commands. This is not a full shell parser;
+    // it is intended to catch obvious path arguments like `./foo`, `../bar`, `/etc/passwd`.
+    pub fn check_bash_paths(&self, command: &str) -> Result<(), SandboxError> {
+        if !self.enabled {
+            return Ok(());
+        }
+
+        let mut parts = command.split_whitespace();
+        let _exec = parts.next();
+
+        for part in parts {
+            if part.starts_with('-') && !part.contains('/') {
+                continue;
+            }
+            if looks_like_path(part) {
+                let path = Path::new(part.trim_matches('"').trim_matches('\''));
+                let _ = self.check_path_allowed(path)?;
+            }
+        }
+        Ok(())
+    }
 }
 
 fn default_allow_commands() -> Vec<String> {
@@ -153,6 +197,13 @@ fn is_within(candidate: &Path, base: &Path) -> bool {
     } else {
         candidate.starts_with(base)
     }
+}
+
+fn looks_like_path(token: &str) -> bool {
+    token.starts_with('/')
+        || token.starts_with("./")
+        || token.starts_with("../")
+        || token.contains('/')
 }
 
 fn extract_executable(command: &str) -> &str {

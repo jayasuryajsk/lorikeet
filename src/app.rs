@@ -66,29 +66,62 @@ impl Message {
 
 #[derive(Debug, Clone)]
 pub struct ToolOutput {
+    pub call_id: String,
     pub tool: String,
-    pub target: String, // What the tool is operating on (file path, command, etc.)
-    pub output: String, // The actual output/result
+    pub args_raw: String,
+    pub args_summary: String,
+    pub args_pretty_lines: Vec<String>,
+    pub cwd: PathBuf,
+    pub sandbox: crate::sandbox::SandboxDecision,
+
+    // Retained for compatibility with existing summary/memory code paths.
+    pub target: String,
+
+    // Full aggregated output (model-visible). The UI should prefer output_lines/tail_lines.
+    pub output: String,
+
+    // Append-only line buffer for stable UI tails.
+    pub output_lines: VecDeque<String>,
+    output_partial: String,
+    output_total_lines: usize,
+    output_truncated: bool,
+
     pub status: ToolStatus,
     pub turn_id: u64,
+
     start_time: Instant,
     end_time: Option<Instant>,
-    last_update: Instant,
-    update_count: usize,
 }
 
 impl ToolOutput {
-    pub fn new(tool: String, target: String, turn_id: u64) -> Self {
+    pub fn new(
+        call_id: String,
+        tool: String,
+        args_raw: String,
+        args_summary: String,
+        cwd: PathBuf,
+        sandbox: crate::sandbox::SandboxDecision,
+        turn_id: u64,
+    ) -> Self {
+        let target = args_summary.clone();
         Self {
+            call_id,
             tool,
+            args_raw: args_raw.clone(),
+            args_summary: args_summary.clone(),
+            args_pretty_lines: pretty_args_lines(&args_raw),
+            cwd,
+            sandbox,
             target,
             output: String::new(),
+            output_lines: VecDeque::new(),
+            output_partial: String::new(),
+            output_total_lines: 0,
+            output_truncated: false,
             status: ToolStatus::Running,
             turn_id,
             start_time: Instant::now(),
             end_time: None,
-            last_update: Instant::now(),
-            update_count: 0,
         }
     }
 
@@ -106,30 +139,91 @@ impl ToolOutput {
             ToolStatus::Error
         };
         self.end_time = Some(Instant::now());
+
+        // Flush any pending partial line so it can be shown in tails.
+        if !self.output_partial.is_empty() {
+            let line = std::mem::take(&mut self.output_partial);
+            self.push_line(line);
+        }
     }
 
-    pub fn append_output(&mut self, content: String) {
-        self.output.push_str(&content);
-        self.last_update = Instant::now();
-        self.update_count = self.update_count.saturating_add(1);
+    pub fn append_chunk(&mut self, chunk: String) {
+        self.output.push_str(&chunk);
+
+        for seg in chunk.split_inclusive('\n') {
+            if let Some(stripped) = seg.strip_suffix('\n') {
+                self.output_partial.push_str(stripped);
+                let line = std::mem::take(&mut self.output_partial);
+                self.push_line(line);
+            } else {
+                self.output_partial.push_str(seg);
+            }
+        }
     }
 
     pub fn set_output(&mut self, content: String) {
-        self.output = content;
-        self.last_update = Instant::now();
-        self.update_count = self.update_count.saturating_add(1);
+        self.output.clear();
+        self.output_lines.clear();
+        self.output_partial.clear();
+        self.output_total_lines = 0;
+        self.output_truncated = false;
+
+        self.append_chunk(content);
     }
 
-    pub fn updates(&self) -> usize {
-        self.update_count
+    fn push_line(&mut self, mut line: String) {
+        const MAX_STORED_LINES: usize = 5_000;
+        const MAX_STORED_CHARS: usize = 80_000;
+
+        // Avoid CRLF artifacts in terminals.
+        if line.ends_with('\r') {
+            line.pop();
+        }
+
+        self.output_total_lines = self.output_total_lines.saturating_add(1);
+        self.output_lines.push_back(line);
+
+        while self.output_lines.len() > MAX_STORED_LINES {
+            self.output_truncated = true;
+            self.output_lines.pop_front();
+        }
+
+        // Best-effort char bound: drop from the front if needed.
+        let mut chars: usize = self.output_lines.iter().map(|l| l.len()).sum();
+        while chars > MAX_STORED_CHARS {
+            self.output_truncated = true;
+            if let Some(front) = self.output_lines.pop_front() {
+                chars = chars.saturating_sub(front.len());
+            } else {
+                break;
+            }
+        }
     }
 
-    pub fn output_len(&self) -> usize {
-        self.output.len()
+    pub fn total_output_lines(&self) -> usize {
+        let partial = if self.output_partial.is_empty() { 0 } else { 1 };
+        self.output_total_lines.saturating_add(partial)
     }
 
-    pub fn time_since_update(&self) -> Duration {
-        self.last_update.elapsed()
+    pub fn tail_lines(&self, max_lines: usize) -> (Vec<String>, usize) {
+        if max_lines == 0 {
+            return (Vec::new(), self.total_output_lines());
+        }
+
+        let mut all: Vec<String> = self.output_lines.iter().cloned().collect();
+        if !self.output_partial.is_empty() {
+            all.push(self.output_partial.clone());
+        }
+
+        let total = self.total_output_lines();
+        let start = all.len().saturating_sub(max_lines);
+        let tail = all[start..].to_vec();
+        let remaining = total.saturating_sub(tail.len());
+        (tail, remaining)
+    }
+
+    pub fn output_is_truncated(&self) -> bool {
+        self.output_truncated
     }
 
     /// Get the icon for this tool type
@@ -166,33 +260,6 @@ impl ToolOutput {
             (_, ToolStatus::Running) => "Processing",
             (_, _) => "Done",
         }
-    }
-
-    /// Summarize output - show first few lines with "... N more lines"
-    pub fn summarized_output(&self, max_lines: usize) -> Vec<String> {
-        let lines: Vec<&str> = self.output.lines().collect();
-        let total = lines.len();
-
-        if total == 0 {
-            return vec![];
-        }
-
-        let mut result: Vec<String> = lines
-            .iter()
-            .take(max_lines)
-            .map(|s| s.to_string())
-            .collect();
-
-        if total > max_lines {
-            let remaining = total - max_lines;
-            result.push(format!(
-                "... {} more line{}",
-                remaining,
-                if remaining == 1 { "" } else { "s" }
-            ));
-        }
-
-        result
     }
 }
 
@@ -285,6 +352,8 @@ pub struct App {
     // Turn-aware tool rendering (inline in chat)
     pub current_turn_id: u64,
     pub tool_group_expanded: HashMap<u64, bool>,
+    pub tool_group_show_details: HashMap<u64, bool>,
+    tool_index_by_call_id: HashMap<String, usize>,
 
     // Context sidebar
     pub recent_files: VecDeque<String>,
@@ -371,6 +440,8 @@ impl App {
             turn_tool_start_idx: 0,
             current_turn_id: 0,
             tool_group_expanded: HashMap::new(),
+            tool_group_show_details: HashMap::new(),
+            tool_index_by_call_id: HashMap::new(),
             recent_files: VecDeque::new(),
             last_searches: VecDeque::new(),
             indexing_status: load_existing_index_status(),
@@ -389,8 +460,14 @@ impl App {
                     self.messages.clear();
                     self.tool_outputs.clear();
                     self.tool_group_expanded.clear();
+                    self.tool_group_show_details.clear();
+                    self.tool_index_by_call_id.clear();
                     self.recent_files.clear();
                     replay_into(&events, &mut self.messages, &mut self.tool_outputs);
+
+                    for (i, t) in self.tool_outputs.iter().enumerate() {
+                        self.tool_index_by_call_id.insert(t.call_id.clone(), i);
+                    }
 
                     // Sync turn counter with the restored transcript so new tool calls
                     // attach to the correct user turn.
@@ -476,11 +553,10 @@ impl App {
         }
     }
 
-    fn session_record_tool_last(&self) {
-        if let (Some(store), Some(last)) = (&self.session, self.tool_outputs.last()) {
-            // Only record completed tools (avoid spam).
-            if last.status != ToolStatus::Running {
-                store.record_tool(last);
+    fn session_record_tool(&self, tool: &ToolOutput) {
+        if let Some(store) = &self.session {
+            if tool.status != ToolStatus::Running {
+                store.record_tool(tool);
             }
         }
     }
@@ -764,6 +840,23 @@ impl App {
                         .copied()
                         .unwrap_or(true);
                     self.tool_group_expanded.insert(self.current_turn_id, !cur);
+                }
+            }
+            KeyCode::Char('i') => {
+                if self.active_pane == Pane::Chat && self.current_turn_id > 0 {
+                    let has_trace = self
+                        .tool_outputs
+                        .iter()
+                        .any(|t| t.turn_id == self.current_turn_id);
+                    if has_trace {
+                        let cur = self
+                            .tool_group_show_details
+                            .get(&self.current_turn_id)
+                            .copied()
+                            .unwrap_or(true);
+                        self.tool_group_show_details
+                            .insert(self.current_turn_id, !cur);
+                    }
                 }
             }
             KeyCode::Char(c) => {
@@ -1174,14 +1267,40 @@ impl App {
             // Execute via bash tool (respects sandbox).
             let tx = self.event_tx.clone();
             let policy = self.sandbox_policy.clone();
+            let call_id = format!("internal:verify:{}", crate::memory::types::unix_ts());
+            let args_raw = serde_json::json!({"command": cmds}).to_string();
+            let args_val: serde_json::Value = serde_json::from_str(&args_raw)
+                .unwrap_or_else(|_| serde_json::json!({"command": cmds}));
+            let args_summary = summarize_tool_call("bash", &args_val);
+            let sandbox = sandbox_decision_for_tool("bash", &args_val, &policy);
+
+            let _ = tx.send(AppEvent::ToolStart(crate::events::ToolStartEvent {
+                call_id: call_id.clone(),
+                tool: "bash".to_string(),
+                args_raw: args_raw.clone(),
+                args_summary,
+                cwd: policy.root.clone(),
+                sandbox: sandbox.clone(),
+            }));
+
+            if !sandbox.allowed {
+                let msg = sandbox
+                    .reason
+                    .clone()
+                    .unwrap_or_else(|| "Sandbox: blocked".to_string());
+                let _ = tx.send(AppEvent::ToolOutput(crate::events::ToolOutputEvent {
+                    call_id: call_id.clone(),
+                    chunk: msg.clone(),
+                }));
+                let _ = tx.send(AppEvent::ToolComplete(crate::events::ToolCompleteEvent {
+                    call_id,
+                    success: false,
+                }));
+                return true;
+            }
+
             tokio::spawn(async move {
-                let _ = crate::tools::execute_tool(
-                    "bash",
-                    &serde_json::json!({"command": cmds}).to_string(),
-                    &tx,
-                    &policy,
-                )
-                .await;
+                let _ = crate::tools::execute_tool("bash", &args_raw, &call_id, &tx, &policy).await;
             });
             return true;
         }
@@ -1392,22 +1511,72 @@ impl App {
                     let mut tool_results = Vec::new();
 
                     for tool_call in &tool_calls {
+                        let call_id = tool_call.id.clone();
                         let name = tool_call.function.name.as_str();
-                        let args_val: serde_json::Value =
-                            match serde_json::from_str(&tool_call.function.arguments) {
-                                Ok(v) => v,
-                                Err(e) => {
-                                    tool_results.push((
-                                        tool_call.id.clone(),
-                                        format!("Error parsing arguments: {}", e),
-                                    ));
-                                    continue;
-                                }
-                            };
+                        let args_raw = tool_call.function.arguments.clone();
+
+                        let args_val: serde_json::Value = match serde_json::from_str(&args_raw) {
+                            Ok(v) => v,
+                            Err(e) => {
+                                // Still show the invocation row for auditability.
+                                let _ =
+                                    tx.send(AppEvent::ToolStart(crate::events::ToolStartEvent {
+                                        call_id: call_id.clone(),
+                                        tool: name.to_string(),
+                                        args_raw: args_raw.clone(),
+                                        args_summary: "<invalid json>".to_string(),
+                                        cwd: policy.root.clone(),
+                                        sandbox: crate::sandbox::SandboxDecision::allow(),
+                                    }));
+                                let msg = format!("Error parsing arguments: {}", e);
+                                let _ =
+                                    tx.send(AppEvent::ToolOutput(crate::events::ToolOutputEvent {
+                                        call_id: call_id.clone(),
+                                        chunk: msg.clone(),
+                                    }));
+                                let _ = tx.send(AppEvent::ToolComplete(
+                                    crate::events::ToolCompleteEvent {
+                                        call_id: call_id.clone(),
+                                        success: false,
+                                    },
+                                ));
+                                tool_results.push((call_id, msg));
+                                continue;
+                            }
+                        };
+
+                        let args_summary = summarize_tool_call(name, &args_val);
+                        let sandbox = sandbox_decision_for_tool(name, &args_val, &policy);
+
+                        let _ = tx.send(AppEvent::ToolStart(crate::events::ToolStartEvent {
+                            call_id: call_id.clone(),
+                            tool: name.to_string(),
+                            args_raw: args_raw.clone(),
+                            args_summary: args_summary.clone(),
+                            cwd: policy.root.clone(),
+                            sandbox: sandbox.clone(),
+                        }));
+
+                        if !sandbox.allowed {
+                            let msg = sandbox
+                                .reason
+                                .clone()
+                                .unwrap_or_else(|| "Sandbox: blocked".to_string());
+                            let _ = tx.send(AppEvent::ToolOutput(crate::events::ToolOutputEvent {
+                                call_id: call_id.clone(),
+                                chunk: msg.clone(),
+                            }));
+                            let _ =
+                                tx.send(AppEvent::ToolComplete(crate::events::ToolCompleteEvent {
+                                    call_id: call_id.clone(),
+                                    success: false,
+                                }));
+                            tool_results.push((call_id, msg));
+                            continue;
+                        }
 
                         let result = match name {
                             "memory_recall" | "memory_save" | "memory_list" | "memory_forget" => {
-                                let _ = tx.send(AppEvent::ToolStart(name.into(), "memory".into()));
                                 let out = match name {
                                     "memory_recall" => {
                                         let query = args_val
@@ -1439,7 +1608,8 @@ impl App {
                                             for (i, sm) in results.iter().enumerate() {
                                                 let m = &sm.memory;
                                                 out.push_str(&format!(
-                                                    "{}. {} [{}] ({:.2}) {}\n",
+                                                    "{}. {} [{}] ({:.2}) {}
+",
                                                     i + 1,
                                                     m.id,
                                                     m.memory_type.as_str(),
@@ -1530,7 +1700,8 @@ impl App {
                                             let mut out = String::new();
                                             for m in memories {
                                                 out.push_str(&format!(
-                                                    "- {} [{}] {}\n",
+                                                    "- {} [{}] {}
+",
                                                     m.id,
                                                     m.memory_type.as_str(),
                                                     m.content.replace('\n', " ")
@@ -1553,19 +1724,23 @@ impl App {
                                     _ => "Error: unknown memory tool".to_string(),
                                 };
                                 let success = !out.starts_with("Error:");
-                                let _ = tx.send(AppEvent::ToolOutput(out.clone()));
-                                let _ = tx.send(AppEvent::ToolComplete(success));
+                                let _ =
+                                    tx.send(AppEvent::ToolOutput(crate::events::ToolOutputEvent {
+                                        call_id: call_id.clone(),
+                                        chunk: out.clone(),
+                                    }));
+                                let _ = tx.send(AppEvent::ToolComplete(
+                                    crate::events::ToolCompleteEvent {
+                                        call_id: call_id.clone(),
+                                        success,
+                                    },
+                                ));
                                 out
                             }
-                            _ => {
-                                let out =
-                                    execute_tool(name, &tool_call.function.arguments, &tx, &policy)
-                                        .await;
-                                out
-                            }
+                            _ => execute_tool(name, &args_raw, &call_id, &tx, &policy).await,
                         };
 
-                        tool_results.push((tool_call.id.clone(), result));
+                        tool_results.push((call_id, result));
                     }
 
                     // Send tool results back for next LLM call
@@ -1597,29 +1772,53 @@ impl App {
                 self.is_processing = false;
                 self.processing_start = None;
             }
-            AppEvent::ToolStart(tool, target) => {
+
+            AppEvent::ToolStart(ev) => {
                 let turn_id = self.current_turn_id;
-                self.tool_outputs
-                    .push(ToolOutput::new(tool, target, turn_id));
+                let idx = self.tool_outputs.len();
+                let tool_run = ToolOutput::new(
+                    ev.call_id.clone(),
+                    ev.tool,
+                    ev.args_raw,
+                    ev.args_summary,
+                    ev.cwd,
+                    ev.sandbox,
+                    turn_id,
+                );
+                self.tool_outputs.push(tool_run);
+                self.tool_index_by_call_id.insert(ev.call_id, idx);
+
                 // Always re-expand when a new tool starts (even if the group auto-collapsed earlier).
                 self.tool_group_expanded.insert(turn_id, true);
+                self.tool_group_show_details.entry(turn_id).or_insert(true);
             }
-            AppEvent::ToolOutput(content) => {
-                if let Some(last) = self.tool_outputs.last_mut() {
-                    last.append_output(content);
+            AppEvent::ToolOutput(ev) => {
+                if let Some(&idx) = self.tool_index_by_call_id.get(&ev.call_id) {
+                    if let Some(t) = self.tool_outputs.get_mut(idx) {
+                        t.append_chunk(ev.chunk);
+                    }
                 }
             }
-            AppEvent::ToolComplete(success) => {
-                let mut snapshot: Option<(String, String, String)> = None;
-                let mut completed_turn: Option<u64> = None;
-                if let Some(last) = self.tool_outputs.last_mut() {
-                    last.complete(success);
-                    snapshot = Some((last.tool.clone(), last.target.clone(), last.output.clone()));
-                    completed_turn = Some(last.turn_id);
-                }
+            AppEvent::ToolComplete(ev) => {
+                let Some(&idx) = self.tool_index_by_call_id.get(&ev.call_id) else {
+                    return;
+                };
 
-                // Persist completed tool output (best-effort).
-                self.session_record_tool_last();
+                let mut snapshot: Option<(String, String, String, bool, u64)> = None;
+                if let Some(t) = self.tool_outputs.get_mut(idx) {
+                    t.complete(ev.success);
+                    snapshot = Some((
+                        t.tool.clone(),
+                        t.target.clone(),
+                        t.output.clone(),
+                        ev.success,
+                        t.turn_id,
+                    ));
+
+                    // Persist completed tool output (best-effort).
+                    let tool_snapshot = t.clone();
+                    self.session_record_tool(&tool_snapshot);
+                }
 
                 let memory_enabled = self
                     .config
@@ -1638,7 +1837,7 @@ impl App {
                 self.refresh_verify_suggestions();
 
                 // Auto-collapse the group if no tools are running for that turn.
-                if let Some(turn_id) = completed_turn {
+                if let Some((tool, target, output, success, turn_id)) = snapshot {
                     let any_running = self
                         .tool_outputs
                         .iter()
@@ -1648,15 +1847,11 @@ impl App {
                     }
 
                     // Track recent files for the context sidebar.
-                    if let Some((tool, target, _)) = snapshot.as_ref() {
-                        if tool == "read_file" || tool == "write_file" || tool == "edit_file" {
-                            self.push_recent_file(target);
-                        }
+                    if tool == "read_file" || tool == "write_file" || tool == "edit_file" {
+                        self.push_recent_file(&target);
                     }
-                }
 
-                if learn_failures {
-                    if let Some((tool, target, output)) = snapshot {
+                    if learn_failures {
                         let memory = self.memory.clone();
                         tokio::spawn(async move {
                             memory
@@ -1666,6 +1861,7 @@ impl App {
                     }
                 }
             }
+
             // Indexing events
             AppEvent::IndexingStarted => {
                 self.indexing_status = IndexingStatus::Indexing {
@@ -1791,6 +1987,151 @@ fn join_paths(paths: &[PathBuf]) -> String {
         .join(", ")
 }
 
+fn pretty_args_lines(raw: &str) -> Vec<String> {
+    // Avoid spewing huge JSON blobs (e.g. write_file content) into the UI details.
+    // We parse JSON, replace very large strings with a placeholder, and pretty-print.
+    const MAX_STRING: usize = 240;
+
+    fn redact(v: &mut serde_json::Value) {
+        match v {
+            serde_json::Value::String(s) => {
+                if s.len() > MAX_STRING {
+                    *s = format!("<{} chars>", s.len());
+                }
+            }
+            serde_json::Value::Array(arr) => {
+                for x in arr {
+                    redact(x);
+                }
+            }
+            serde_json::Value::Object(map) => {
+                for (_k, x) in map.iter_mut() {
+                    redact(x);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut v: serde_json::Value = match serde_json::from_str(raw) {
+        Ok(v) => v,
+        Err(_) => return vec![raw.to_string()],
+    };
+    redact(&mut v);
+    match serde_json::to_string_pretty(&v) {
+        Ok(s) => s.lines().map(|l| l.to_string()).collect(),
+        Err(_) => vec![raw.to_string()],
+    }
+}
+
+fn summarize_tool_call(name: &str, args: &serde_json::Value) -> String {
+    fn trunc(s: &str, max: usize) -> String {
+        let t = s.trim();
+        if t.len() <= max {
+            return t.to_string();
+        }
+        let mut out = t.to_string();
+        out.truncate(max.saturating_sub(3));
+        out.push_str("...");
+        out
+    }
+
+    match name {
+        "bash" => {
+            let cmd = args.get("command").and_then(|v| v.as_str()).unwrap_or("");
+            trunc(cmd, 120)
+        }
+        "rg" => {
+            let q = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
+            let path = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
+            if q.is_empty() {
+                format!("in {}", path)
+            } else {
+                trunc(&format!("{} in {}", q, path), 120)
+            }
+        }
+        "read_file" | "write_file" | "list_files" => {
+            let path = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
+            trunc(path, 140)
+        }
+        "edit_file" => {
+            let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
+            let old_str = args
+                .get("old_string")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if old_str.is_empty() {
+                trunc(path, 140)
+            } else {
+                trunc(
+                    &format!("{} (replace: {})", path, old_str.replace('\n', " ")),
+                    140,
+                )
+            }
+        }
+        "semantic_search" => {
+            let q = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
+            trunc(q, 140)
+        }
+        "memory_recall" => {
+            let q = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
+            trunc(&format!("recall: {}", q), 140)
+        }
+        "memory_save" => {
+            let t = args.get("type").and_then(|v| v.as_str()).unwrap_or("fact");
+            let c = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
+            trunc(&format!("save({}): {}", t, c), 140)
+        }
+        "memory_list" => "list".to_string(),
+        "memory_forget" => {
+            let id = args.get("id").and_then(|v| v.as_str()).unwrap_or("");
+            trunc(&format!("forget: {}", id), 140)
+        }
+        _ => trunc(&args.to_string(), 120),
+    }
+}
+
+fn sandbox_decision_for_tool(
+    name: &str,
+    args: &serde_json::Value,
+    policy: &SandboxPolicy,
+) -> crate::sandbox::SandboxDecision {
+    use crate::sandbox::SandboxDecision;
+    use std::path::Path;
+
+    if let Err(e) = policy.check_tool_allowed(name) {
+        return SandboxDecision::deny(e.to_string());
+    }
+
+    match name {
+        "bash" => {
+            let cmd = args.get("command").and_then(|v| v.as_str()).unwrap_or("");
+            if let Err(e) = policy.check_command_allowed(cmd) {
+                return SandboxDecision::deny(e.to_string());
+            }
+            if let Err(e) = policy.check_bash_paths(cmd) {
+                return SandboxDecision::deny(e.to_string());
+            }
+            SandboxDecision::allow()
+        }
+        "rg" => {
+            let path = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
+            match policy.check_path_allowed(Path::new(path)) {
+                Ok(_) => SandboxDecision::allow(),
+                Err(e) => SandboxDecision::deny(e.to_string()),
+            }
+        }
+        "read_file" | "write_file" | "list_files" | "edit_file" => {
+            let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
+            match policy.check_path_allowed(Path::new(path)) {
+                Ok(_) => SandboxDecision::allow(),
+                Err(e) => SandboxDecision::deny(e.to_string()),
+            }
+        }
+        _ => SandboxDecision::allow(),
+    }
+}
+
 fn build_turn_summary(user_message: &str, agent_response: &str, tools: &[ToolOutput]) -> String {
     let mut out = String::new();
 
@@ -1911,5 +2252,60 @@ fn load_existing_index_status() -> IndexingStatus {
             }
         }
         Err(_) => IndexingStatus::NotStarted,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tool_runs_are_linked_by_call_id() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let tmp = std::env::temp_dir()
+                .join(format!("lorikeet-test-{}", crate::memory::types::unix_ts()));
+            let _ = std::fs::create_dir_all(&tmp);
+
+            let (tx, _rx) = mpsc::unbounded_channel::<AppEvent>();
+            let config = AppConfig::default();
+            let policy = Arc::new(SandboxPolicy::from_config(
+                config.clone(),
+                tmp.clone(),
+                crate::tools::TOOL_NAMES,
+            ));
+            let memory = Arc::new(MemoryManager::init(&tmp).await.unwrap());
+
+            let mut app = App::new(tx, "k".into(), policy.clone(), config, tmp.clone(), memory);
+            app.current_turn_id = 1;
+
+            app.handle_event(AppEvent::ToolStart(crate::events::ToolStartEvent {
+                call_id: "call-a".into(),
+                tool: "bash".into(),
+                args_raw: r#"{"command":"echo a"}"#.into(),
+                args_summary: "echo a".into(),
+                cwd: tmp.clone(),
+                sandbox: crate::sandbox::SandboxDecision::allow(),
+            }));
+            app.handle_event(AppEvent::ToolStart(crate::events::ToolStartEvent {
+                call_id: "call-b".into(),
+                tool: "bash".into(),
+                args_raw: r#"{"command":"echo b"}"#.into(),
+                args_summary: "echo b".into(),
+                cwd: tmp.clone(),
+                sandbox: crate::sandbox::SandboxDecision::allow(),
+            }));
+
+            app.handle_event(AppEvent::ToolOutput(crate::events::ToolOutputEvent {
+                call_id: "call-a".into(),
+                chunk: "A
+"
+                .into(),
+            }));
+
+            assert_eq!(app.tool_outputs.len(), 2);
+            assert!(app.tool_outputs[0].output.contains('A'));
+            assert!(app.tool_outputs[1].output.is_empty());
+        });
     }
 }
