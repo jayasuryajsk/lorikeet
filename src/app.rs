@@ -476,16 +476,15 @@ impl App {
             return;
         }
 
-        let input_snapshot = self.input.clone();
-        if self.maybe_handle_command(&input_snapshot) {
-            self.input.clear();
-            self.cursor_pos = 0;
-            return;
-        }
-
         let user_msg = std::mem::take(&mut self.input);
         let user_msg_for_mem = user_msg.clone();
         self.cursor_pos = 0;
+
+        // Each submitted user message is a new turn.
+        self.current_turn_id = self.current_turn_id.saturating_add(1);
+        self.turn_tool_start_idx = self.tool_outputs.len();
+        self.turn_user_message = Some(user_msg_for_mem.clone());
+
         self.messages.push(Message {
             role: Role::User,
             content: user_msg,
@@ -497,9 +496,18 @@ impl App {
             self.session_record_message(last);
         }
 
-        self.turn_tool_start_idx = self.tool_outputs.len();
-        self.current_turn_id = self.current_turn_id.saturating_add(1);
-        self.turn_user_message = Some(user_msg_for_mem.clone());
+        let last_user = self
+            .messages
+            .iter()
+            .rev()
+            .find(|m| m.role == Role::User)
+            .map(|m| m.content.clone())
+            .unwrap_or_default();
+
+        if self.maybe_handle_command(&last_user) {
+            self.scroll_messages_to_bottom();
+            return;
+        }
 
         let memory_enabled = self
             .config
