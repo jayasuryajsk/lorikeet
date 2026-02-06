@@ -443,7 +443,7 @@ fn render_turn_tools_inline(
         .tool_group_expanded
         .get(&turn_id)
         .copied()
-        .unwrap_or(any_running);
+        .unwrap_or(false);
     let show_details = app
         .tool_group_show_details
         .get(&turn_id)
@@ -606,16 +606,39 @@ fn render_tool_trace_item(
         }
     }
 
-    if tool.output.is_empty() && tool.output_lines.is_empty() {
+    let has_output = !tool.output.is_empty() || !tool.output_lines.is_empty();
+
+    // Collapsed-by-default: show only a single live tail line while running.
+    if !group_expanded {
+        if tool.status == ToolStatus::Running && has_output {
+            let (tail, _remaining) = tool.tail_lines(1);
+            if let Some(last) = tail.last() {
+                let last = last.trim();
+                if !last.is_empty() {
+                    out.push(Line::from(vec![
+                        Span::raw("    "),
+                        Span::styled(
+                            format!(
+                                "… {}",
+                                truncate_to_width(last, chat_width.saturating_sub(6))
+                            ),
+                            Style::default().fg(Color::Rgb(170, 170, 170)),
+                        ),
+                    ]));
+                }
+            }
+        }
+        return;
+    }
+
+    if !has_output {
         return;
     }
 
     let k = if tool.status == ToolStatus::Running {
         8
-    } else if group_expanded {
-        20
     } else {
-        2
+        20
     };
 
     let (tail, remaining) = tool.tail_lines(k);

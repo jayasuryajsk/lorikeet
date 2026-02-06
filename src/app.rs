@@ -1788,8 +1788,8 @@ impl App {
                 self.tool_outputs.push(tool_run);
                 self.tool_index_by_call_id.insert(ev.call_id, idx);
 
-                // Always re-expand when a new tool starts (even if the group auto-collapsed earlier).
-                self.tool_group_expanded.insert(turn_id, true);
+                // Default collapsed: show live one-line tails; expand with `e` when needed.
+                self.tool_group_expanded.entry(turn_id).or_insert(false);
                 self.tool_group_show_details.entry(turn_id).or_insert(true);
             }
             AppEvent::ToolOutput(ev) => {
