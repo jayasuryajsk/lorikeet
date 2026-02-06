@@ -24,6 +24,7 @@ pub struct Message {
     pub content: String,
     pub reasoning: Option<String>,
     pub tool_calls: Option<Vec<ToolCallMessage>>,
+    pub tool_group_id: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -88,6 +89,7 @@ pub struct ToolOutput {
 
     pub status: ToolStatus,
     pub turn_id: u64,
+    pub group_id: u64,
 
     start_time: Instant,
     end_time: Option<Instant>,
@@ -102,6 +104,7 @@ impl ToolOutput {
         cwd: PathBuf,
         sandbox: crate::sandbox::SandboxDecision,
         turn_id: u64,
+        group_id: u64,
     ) -> Self {
         let target = args_summary.clone();
         Self {
@@ -120,6 +123,7 @@ impl ToolOutput {
             output_truncated: false,
             status: ToolStatus::Running,
             turn_id,
+            group_id,
             start_time: Instant::now(),
             end_time: None,
         }
@@ -349,10 +353,19 @@ pub struct App {
     turn_user_message: Option<String>,
     turn_tool_start_idx: usize,
 
-    // Turn-aware tool rendering (inline in chat)
+    // Turn tracking (for memory extraction and grouping user messages)
     pub current_turn_id: u64,
-    pub tool_group_expanded: HashMap<u64, bool>,
-    pub tool_group_show_details: HashMap<u64, bool>,
+
+    // Tool trace grouping (one group per assistant tool-call phase)
+    next_tool_group_id: u64,
+    pub last_tool_group_id: Option<u64>,
+    tool_group_by_call_id: HashMap<String, u64>,
+
+    // Inline tool trace UI state (keyed by tool_group_id)
+    pub tool_trace_expanded: HashMap<u64, bool>,
+    pub tool_trace_show_details: HashMap<u64, bool>,
+
+    // Tool run index
     tool_index_by_call_id: HashMap<String, usize>,
 
     // Context sidebar
@@ -399,12 +412,14 @@ impl App {
                     content: SYSTEM_PROMPT.into(),
                     reasoning: None,
                     tool_calls: None,
+                    tool_group_id: None,
                 },
                 Message {
                     role: Role::Agent,
                     content: "Lorikeet ready. I can execute commands, read/write files, and help you build things. What would you like to do?".into(),
                     reasoning: None,
                     tool_calls: None,
+                    tool_group_id: None,
                 },
             ],
             messages_scroll: 0,
@@ -439,8 +454,11 @@ impl App {
             turn_user_message: None,
             turn_tool_start_idx: 0,
             current_turn_id: 0,
-            tool_group_expanded: HashMap::new(),
-            tool_group_show_details: HashMap::new(),
+            next_tool_group_id: 1,
+            last_tool_group_id: None,
+            tool_group_by_call_id: HashMap::new(),
+            tool_trace_expanded: HashMap::new(),
+            tool_trace_show_details: HashMap::new(),
             tool_index_by_call_id: HashMap::new(),
             recent_files: VecDeque::new(),
             last_searches: VecDeque::new(),
@@ -459,11 +477,41 @@ impl App {
                     // Rebuild app state from events.
                     self.messages.clear();
                     self.tool_outputs.clear();
-                    self.tool_group_expanded.clear();
-                    self.tool_group_show_details.clear();
+                    self.tool_trace_expanded.clear();
+                    self.tool_trace_show_details.clear();
                     self.tool_index_by_call_id.clear();
+                    self.tool_group_by_call_id.clear();
+                    self.last_tool_group_id = None;
+                    self.next_tool_group_id = 1;
                     self.recent_files.clear();
                     replay_into(&events, &mut self.messages, &mut self.tool_outputs);
+
+                    // Rebuild call_id -> group_id mapping from persisted tool events (best-effort).
+                    for t in &self.tool_outputs {
+                        self.tool_group_by_call_id
+                            .insert(t.call_id.clone(), t.group_id);
+                    }
+
+                    // Restore group id counters so new tool calls stay in-order after resume.
+                    let max_group_msg = self
+                        .messages
+                        .iter()
+                        .filter_map(|m| m.tool_group_id)
+                        .max()
+                        .unwrap_or(0);
+                    let max_group_tool = self
+                        .tool_outputs
+                        .iter()
+                        .map(|t| t.group_id)
+                        .max()
+                        .unwrap_or(0);
+                    let max_group_id = max_group_msg.max(max_group_tool);
+                    self.next_tool_group_id = max_group_id.saturating_add(1).max(1);
+                    self.last_tool_group_id = if max_group_id > 0 {
+                        Some(max_group_id)
+                    } else {
+                        None
+                    };
 
                     for (i, t) in self.tool_outputs.iter().enumerate() {
                         self.tool_index_by_call_id.insert(t.call_id.clone(), i);
@@ -509,6 +557,7 @@ impl App {
                                 content: SYSTEM_PROMPT.into(),
                                 reasoning: None,
                                 tool_calls: None,
+                                tool_group_id: None,
                             },
                         );
                     }
@@ -521,6 +570,7 @@ impl App {
                         content: "(resumed previous session)".into(),
                         reasoning: None,
                         tool_calls: None,
+                        tool_group_id: None,
                     });
                     return;
                 }
@@ -616,6 +666,7 @@ impl App {
             content: user_msg,
             reasoning: None,
             tool_calls: None,
+            tool_group_id: None,
         });
 
         if let Some(last) = self.messages.last() {
@@ -833,21 +884,20 @@ impl App {
                 Pane::Context => {}
             },
             KeyCode::Char('e') => {
-                if key.modifiers.contains(KeyModifiers::CONTROL)
-                    && self.active_pane == Pane::Chat
-                    && self.current_turn_id > 0
-                {
-                    let has_trace = self
-                        .tool_outputs
-                        .iter()
-                        .any(|t| t.turn_id == self.current_turn_id);
-                    if has_trace {
-                        let cur = self
-                            .tool_group_expanded
-                            .get(&self.current_turn_id)
-                            .copied()
-                            .unwrap_or(false);
-                        self.tool_group_expanded.insert(self.current_turn_id, !cur);
+                if key.modifiers.contains(KeyModifiers::CONTROL) && self.active_pane == Pane::Chat {
+                    if let Some(group_id) = self.last_tool_group_id {
+                        let has_trace = self
+                            .tool_outputs
+                            .iter()
+                            .any(|t| t.group_id == group_id);
+                        if has_trace {
+                            let cur = self
+                                .tool_trace_expanded
+                                .get(&group_id)
+                                .copied()
+                                .unwrap_or(false);
+                            self.tool_trace_expanded.insert(group_id, !cur);
+                        }
                     }
                     return;
                 }
@@ -855,22 +905,20 @@ impl App {
                 self.cursor_pos += 1;
             }
             KeyCode::Char('i') => {
-                if key.modifiers.contains(KeyModifiers::CONTROL)
-                    && self.active_pane == Pane::Chat
-                    && self.current_turn_id > 0
-                {
-                    let has_trace = self
-                        .tool_outputs
-                        .iter()
-                        .any(|t| t.turn_id == self.current_turn_id);
-                    if has_trace {
-                        let cur = self
-                            .tool_group_show_details
-                            .get(&self.current_turn_id)
-                            .copied()
-                            .unwrap_or(true);
-                        self.tool_group_show_details
-                            .insert(self.current_turn_id, !cur);
+                if key.modifiers.contains(KeyModifiers::CONTROL) && self.active_pane == Pane::Chat {
+                    if let Some(group_id) = self.last_tool_group_id {
+                        let has_trace = self
+                            .tool_outputs
+                            .iter()
+                            .any(|t| t.group_id == group_id);
+                        if has_trace {
+                            let cur = self
+                                .tool_trace_show_details
+                                .get(&group_id)
+                                .copied()
+                                .unwrap_or(true);
+                            self.tool_trace_show_details.insert(group_id, !cur);
+                        }
                     }
                     return;
                 }
@@ -1230,12 +1278,24 @@ impl App {
             // Start a fresh session but keep the system prompt.
             self.messages.retain(|m| m.role == Role::System);
             self.tool_outputs.clear();
+            self.tool_index_by_call_id.clear();
+            self.tool_group_by_call_id.clear();
+            self.tool_trace_expanded.clear();
+            self.tool_trace_show_details.clear();
+            self.recent_files.clear();
+            self.last_searches.clear();
+            self.turn_user_message = None;
+            self.turn_tool_start_idx = 0;
+            self.current_turn_id = 0;
+            self.next_tool_group_id = 1;
+            self.last_tool_group_id = None;
             self.new_session();
             self.messages.push(Message {
                 role: Role::Agent,
                 content: "(new session)".into(),
                 reasoning: None,
                 tool_calls: None,
+                tool_group_id: None,
             });
             self.scroll_messages_to_bottom();
             return true;
@@ -1255,6 +1315,7 @@ impl App {
                     content: "No verify suggestions for this workspace yet.".into(),
                     reasoning: None,
                     tool_calls: None,
+                    tool_group_id: None,
                 });
                 self.scroll_messages_to_bottom();
                 if let Some(last) = self.messages.last() {
@@ -1271,11 +1332,16 @@ impl App {
                 .collect::<Vec<_>>()
                 .join(" && ");
 
+            let group_id = self.next_tool_group_id;
+            self.next_tool_group_id = self.next_tool_group_id.saturating_add(1);
+            self.last_tool_group_id = Some(group_id);
+
             self.messages.push(Message {
                 role: Role::Agent,
                 content: format!("Running verify: {}", cmds),
                 reasoning: None,
                 tool_calls: None,
+                tool_group_id: Some(group_id),
             });
             self.scroll_messages_to_bottom();
             if let Some(last) = self.messages.last() {
@@ -1286,6 +1352,7 @@ impl App {
             let tx = self.event_tx.clone();
             let policy = self.sandbox_policy.clone();
             let call_id = format!("internal:verify:{}", crate::memory::types::unix_ts());
+            self.tool_group_by_call_id.insert(call_id.clone(), group_id);
             let args_raw = serde_json::json!({"command": cmds}).to_string();
             let args_val: serde_json::Value = serde_json::from_str(&args_raw)
                 .unwrap_or_else(|_| serde_json::json!({"command": cmds}));
@@ -1341,6 +1408,7 @@ impl App {
                 content: msg,
                 reasoning: None,
                 tool_calls: None,
+                tool_group_id: None,
             });
             self.scroll_messages_to_bottom();
             if let Some(last) = self.messages.last() {
@@ -1437,6 +1505,7 @@ impl App {
                             Some(reasoning)
                         },
                         tool_calls: None,
+                        tool_group_id: None,
                     });
                     self.scroll_messages_to_bottom();
                     if let Some(last) = self.messages.last() {
@@ -1505,6 +1574,16 @@ impl App {
                 // Save assistant message with tool calls
                 let response = std::mem::take(&mut self.current_response);
                 let reasoning = std::mem::take(&mut self.current_reasoning);
+
+                // Each tool-call phase gets its own group id so tool traces can be interleaved
+                // with the assistant's narrative without duplicating previous tool phases.
+                let group_id = self.next_tool_group_id;
+                self.next_tool_group_id = self.next_tool_group_id.saturating_add(1);
+                self.last_tool_group_id = Some(group_id);
+                for tc in &tool_calls {
+                    self.tool_group_by_call_id.insert(tc.id.clone(), group_id);
+                }
+
                 self.messages.push(Message {
                     role: Role::Agent,
                     content: response,
@@ -1514,6 +1593,7 @@ impl App {
                         Some(reasoning)
                     },
                     tool_calls: Some(tool_calls.clone()),
+                    tool_group_id: Some(group_id),
                 });
                 self.scroll_messages_to_bottom();
                 if let Some(last) = self.messages.last() {
@@ -1773,6 +1853,7 @@ impl App {
                         content: result,
                         reasoning: Some(tool_call_id), // Store tool_call_id here
                         tool_calls: None,
+                        tool_group_id: None,
                     });
                 }
 
@@ -1785,6 +1866,7 @@ impl App {
                     content: format!("[Error: {}]", err),
                     reasoning: None,
                     tool_calls: None,
+                    tool_group_id: None,
                 });
                 self.scroll_messages_to_bottom();
                 self.is_processing = false;
@@ -1793,6 +1875,15 @@ impl App {
 
             AppEvent::ToolStart(ev) => {
                 let turn_id = self.current_turn_id;
+                let group_id = self
+                    .tool_group_by_call_id
+                    .get(&ev.call_id)
+                    .copied()
+                    .unwrap_or(0);
+                if group_id > 0 {
+                    self.last_tool_group_id = Some(group_id);
+                }
+
                 let idx = self.tool_outputs.len();
                 let tool_run = ToolOutput::new(
                     ev.call_id.clone(),
@@ -1802,13 +1893,16 @@ impl App {
                     ev.cwd,
                     ev.sandbox,
                     turn_id,
+                    group_id,
                 );
                 self.tool_outputs.push(tool_run);
                 self.tool_index_by_call_id.insert(ev.call_id, idx);
 
-                // Default collapsed: show live one-line tails; expand with `e` when needed.
-                self.tool_group_expanded.entry(turn_id).or_insert(false);
-                self.tool_group_show_details.entry(turn_id).or_insert(true);
+                // Default collapsed: show live one-line tails; expand with Ctrl+E / Ctrl+I when needed.
+                if group_id > 0 {
+                    self.tool_trace_expanded.entry(group_id).or_insert(false);
+                    self.tool_trace_show_details.entry(group_id).or_insert(true);
+                }
             }
             AppEvent::ToolOutput(ev) => {
                 if let Some(&idx) = self.tool_index_by_call_id.get(&ev.call_id) {
@@ -1822,7 +1916,7 @@ impl App {
                     return;
                 };
 
-                let mut snapshot: Option<(String, String, String, bool, u64)> = None;
+                let mut snapshot: Option<(String, String, String, bool, u64, u64)> = None;
                 if let Some(t) = self.tool_outputs.get_mut(idx) {
                     t.complete(ev.success);
                     snapshot = Some((
@@ -1831,6 +1925,7 @@ impl App {
                         t.output.clone(),
                         ev.success,
                         t.turn_id,
+                        t.group_id,
                     ));
 
                     // Persist completed tool output (best-effort).
@@ -1854,14 +1949,16 @@ impl App {
 
                 self.refresh_verify_suggestions();
 
-                // Auto-collapse the group if no tools are running for that turn.
-                if let Some((tool, target, output, success, turn_id)) = snapshot {
-                    let any_running = self
-                        .tool_outputs
-                        .iter()
-                        .any(|t| t.turn_id == turn_id && t.status == ToolStatus::Running);
-                    if !any_running {
-                        self.tool_group_expanded.insert(turn_id, false);
+                // Auto-collapse the tool trace group when no tools are running for it.
+                if let Some((tool, target, output, success, _turn_id, group_id)) = snapshot {
+                    if group_id > 0 {
+                        let any_running = self
+                            .tool_outputs
+                            .iter()
+                            .any(|t| t.group_id == group_id && t.status == ToolStatus::Running);
+                        if !any_running {
+                            self.tool_trace_expanded.insert(group_id, false);
+                        }
                     }
 
                     // Track recent files for the context sidebar.

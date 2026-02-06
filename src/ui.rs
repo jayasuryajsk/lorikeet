@@ -57,7 +57,6 @@ pub fn ui(frame: &mut Frame, app: &mut App) {
 
     // Render messages with markdown + inline tools
     let mut all_lines: Vec<Line> = Vec::new();
-    let mut turn_id: u64 = 0;
 
     // Copy the messages so we can mutably borrow `app` while rendering tools.
     let display_messages: Vec<_> = app.display_messages().cloned().collect();
@@ -137,16 +136,11 @@ pub fn ui(frame: &mut Frame, app: &mut App) {
         }
         all_lines.push(Line::from("")); // single line spacing between messages
 
-        // Turn tracking: increment on user messages.
-        if msg.role == Role::User {
-            turn_id = turn_id.saturating_add(1);
-        }
-
-        // Tool trace belongs to the assistant tool-call phase, not the user message.
-        // Render it immediately after the assistant message that carried tool_calls.
+        // Tool trace belongs to the assistant tool-call phase.
+        // Render it immediately after the assistant message that initiated the tool group.
         if msg.role == Role::Agent {
-            if msg.tool_calls.is_some() {
-                render_turn_tools_inline(&*app, turn_id, tool_spinner, chat_width, &mut all_lines);
+            if let Some(group_id) = msg.tool_group_id {
+                render_tool_group_inline(&*app, group_id, tool_spinner, chat_width, &mut all_lines);
             }
         }
     }
@@ -302,11 +296,8 @@ pub fn ui(frame: &mut Frame, app: &mut App) {
     let mut status_text =
         " ESC quit │ TAB switch │ CTRL+←/→ resize │ SHIFT+↑↓ scroll │ PgUp/PgDn │ ENTER send"
             .to_string();
-    if app.current_turn_id > 0 {
-        let has_trace = app
-            .tool_outputs
-            .iter()
-            .any(|t| t.turn_id == app.current_turn_id);
+    if let Some(group_id) = app.last_tool_group_id {
+        let has_trace = app.tool_outputs.iter().any(|t| t.group_id == group_id);
         if has_trace {
             status_text.push_str(" │ Ctrl+E trace │ Ctrl+I details");
         }
@@ -429,9 +420,9 @@ fn render_settings_popup(frame: &mut Frame, app: &mut App) {
     frame.set_cursor_position((cursor_x, cursor_y));
 }
 
-fn render_turn_tools_inline(
+fn render_tool_group_inline(
     app: &App,
-    turn_id: u64,
+    group_id: u64,
     tool_spinner: &str,
     chat_width: usize,
     out: &mut Vec<Line<'static>>,
@@ -439,7 +430,7 @@ fn render_turn_tools_inline(
     let tools: Vec<&ToolOutput> = app
         .tool_outputs
         .iter()
-        .filter(|t| t.turn_id == turn_id)
+        .filter(|t| t.group_id == group_id)
         .collect();
     if tools.is_empty() {
         return;
@@ -447,13 +438,13 @@ fn render_turn_tools_inline(
 
     let any_running = tools.iter().any(|t| t.status == ToolStatus::Running);
     let expanded = app
-        .tool_group_expanded
-        .get(&turn_id)
+        .tool_trace_expanded
+        .get(&group_id)
         .copied()
         .unwrap_or(false);
     let show_details = app
-        .tool_group_show_details
-        .get(&turn_id)
+        .tool_trace_show_details
+        .get(&group_id)
         .copied()
         .unwrap_or(true);
 

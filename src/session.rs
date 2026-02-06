@@ -15,6 +15,8 @@ pub enum SessionEvent {
         content: String,
         #[serde(default)]
         reasoning: Option<String>,
+        #[serde(default)]
+        tool_group_id: Option<u64>,
     },
     Tool {
         ts: i64,
@@ -34,6 +36,8 @@ pub enum SessionEvent {
         sandbox_allowed: Option<bool>,
         #[serde(default)]
         sandbox_reason: Option<String>,
+        #[serde(default)]
+        group_id: Option<u64>,
     },
     Meta {
         ts: i64,
@@ -118,6 +122,7 @@ impl SessionStore {
             role: role_to_string(msg.role),
             content: msg.content.clone(),
             reasoning: msg.reasoning.clone(),
+            tool_group_id: msg.tool_group_id,
         });
     }
 
@@ -135,6 +140,7 @@ impl SessionStore {
             cwd: Some(tool.cwd.display().to_string()),
             sandbox_allowed: Some(tool.sandbox.allowed),
             sandbox_reason: tool.sandbox.reason.clone(),
+            group_id: Some(tool.group_id),
         });
     }
 
@@ -166,6 +172,7 @@ pub fn replay_into(
                 role,
                 content,
                 reasoning,
+                tool_group_id,
                 ..
             } => {
                 if role.eq_ignore_ascii_case("user") {
@@ -176,6 +183,7 @@ pub fn replay_into(
                     content: content.clone(),
                     reasoning: reasoning.clone(),
                     tool_calls: None,
+                    tool_group_id: *tool_group_id,
                 });
             }
             SessionEvent::Tool {
@@ -188,6 +196,7 @@ pub fn replay_into(
                 cwd,
                 sandbox_allowed,
                 sandbox_reason,
+                group_id,
                 ..
             } => {
                 let call_id = call_id.clone().unwrap_or_else(|| "<legacy>".to_string());
@@ -209,6 +218,7 @@ pub fn replay_into(
                     cwd_path,
                     sandbox,
                     turn_id,
+                    group_id.unwrap_or(0),
                 );
                 t.set_output(output.clone());
                 let success = status.eq_ignore_ascii_case("success");
@@ -236,12 +246,14 @@ mod tests {
                 role: "user".into(),
                 content: "hi".into(),
                 reasoning: None,
+                tool_group_id: None,
             },
             SessionEvent::Message {
                 ts: 0,
                 role: "assistant".into(),
                 content: "ok".into(),
                 reasoning: None,
+                tool_group_id: None,
             },
             SessionEvent::Tool {
                 ts: 0,
@@ -255,12 +267,14 @@ mod tests {
                 cwd: None,
                 sandbox_allowed: None,
                 sandbox_reason: None,
+                group_id: None,
             },
             SessionEvent::Message {
                 ts: 0,
                 role: "user".into(),
                 content: "next".into(),
                 reasoning: None,
+                tool_group_id: None,
             },
             SessionEvent::Tool {
                 ts: 0,
@@ -274,6 +288,7 @@ mod tests {
                 cwd: None,
                 sandbox_allowed: None,
                 sandbox_reason: None,
+                group_id: None,
             },
         ];
 
@@ -294,6 +309,7 @@ mod tests {
                 role: "user".into(),
                 content: "hi".into(),
                 reasoning: None,
+                tool_group_id: None,
             },
             SessionEvent::Tool {
                 ts: 0,
@@ -307,6 +323,7 @@ mod tests {
                 cwd: Some("/tmp".into()),
                 sandbox_allowed: Some(true),
                 sandbox_reason: None,
+                group_id: None,
             },
         ];
 
