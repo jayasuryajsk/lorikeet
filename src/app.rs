@@ -371,7 +371,40 @@ impl App {
                     // Rebuild app state from events.
                     self.messages.clear();
                     self.tool_outputs.clear();
+                    self.tool_group_expanded.clear();
+                    self.recent_files.clear();
                     replay_into(&events, &mut self.messages, &mut self.tool_outputs);
+
+                    // Sync turn counter with the restored transcript so new tool calls
+                    // attach to the correct user turn.
+                    let user_turns = self
+                        .messages
+                        .iter()
+                        .filter(|m| m.role == Role::User)
+                        .count() as u64;
+                    let max_tool_turn = self
+                        .tool_outputs
+                        .iter()
+                        .map(|t| t.turn_id)
+                        .max()
+                        .unwrap_or(0);
+                    self.current_turn_id = user_turns.max(max_tool_turn);
+
+                    // Rebuild a small context list from restored tools.
+                    let recent_paths: Vec<String> = self
+                        .tool_outputs
+                        .iter()
+                        .filter(|t| {
+                            t.status != ToolStatus::Running
+                                && (t.tool == "read_file"
+                                    || t.tool == "write_file"
+                                    || t.tool == "edit_file")
+                        })
+                        .map(|t| t.target.clone())
+                        .collect();
+                    for p in recent_paths {
+                        self.push_recent_file(&p);
+                    }
 
                     // Ensure we always have a system prompt to guide the agent.
                     if !self.messages.iter().any(|m| m.role == Role::System) {
