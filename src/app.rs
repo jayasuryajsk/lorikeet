@@ -833,17 +833,32 @@ impl App {
                 Pane::Context => {}
             },
             KeyCode::Char('e') => {
-                if self.active_pane == Pane::Chat && self.current_turn_id > 0 {
-                    let cur = self
-                        .tool_group_expanded
-                        .get(&self.current_turn_id)
-                        .copied()
-                        .unwrap_or(true);
-                    self.tool_group_expanded.insert(self.current_turn_id, !cur);
+                if key.modifiers.contains(KeyModifiers::CONTROL)
+                    && self.active_pane == Pane::Chat
+                    && self.current_turn_id > 0
+                {
+                    let has_trace = self
+                        .tool_outputs
+                        .iter()
+                        .any(|t| t.turn_id == self.current_turn_id);
+                    if has_trace {
+                        let cur = self
+                            .tool_group_expanded
+                            .get(&self.current_turn_id)
+                            .copied()
+                            .unwrap_or(false);
+                        self.tool_group_expanded.insert(self.current_turn_id, !cur);
+                    }
+                    return;
                 }
+                self.input.insert(self.cursor_pos, 'e');
+                self.cursor_pos += 1;
             }
             KeyCode::Char('i') => {
-                if self.active_pane == Pane::Chat && self.current_turn_id > 0 {
+                if key.modifiers.contains(KeyModifiers::CONTROL)
+                    && self.active_pane == Pane::Chat
+                    && self.current_turn_id > 0
+                {
                     let has_trace = self
                         .tool_outputs
                         .iter()
@@ -857,7 +872,10 @@ impl App {
                         self.tool_group_show_details
                             .insert(self.current_turn_id, !cur);
                     }
+                    return;
                 }
+                self.input.insert(self.cursor_pos, 'i');
+                self.cursor_pos += 1;
             }
             KeyCode::Char(c) => {
                 self.input.insert(self.cursor_pos, c);

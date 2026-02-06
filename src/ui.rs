@@ -137,10 +137,17 @@ pub fn ui(frame: &mut Frame, app: &mut App) {
         }
         all_lines.push(Line::from("")); // single line spacing between messages
 
-        // Inline tools group: render immediately after each user message.
+        // Turn tracking: increment on user messages.
         if msg.role == Role::User {
             turn_id = turn_id.saturating_add(1);
-            render_turn_tools_inline(&*app, turn_id, tool_spinner, chat_width, &mut all_lines);
+        }
+
+        // Tool trace belongs to the assistant tool-call phase, not the user message.
+        // Render it immediately after the assistant message that carried tool_calls.
+        if msg.role == Role::Agent {
+            if msg.tool_calls.is_some() {
+                render_turn_tools_inline(&*app, turn_id, tool_spinner, chat_width, &mut all_lines);
+            }
         }
     }
 
@@ -301,7 +308,7 @@ pub fn ui(frame: &mut Frame, app: &mut App) {
             .iter()
             .any(|t| t.turn_id == app.current_turn_id);
         if has_trace {
-            status_text.push_str(" │ e trace │ i details");
+            status_text.push_str(" │ Ctrl+E trace │ Ctrl+I details");
         }
     }
     if !app.verify_suggestions.is_empty() {
