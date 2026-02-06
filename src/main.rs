@@ -61,8 +61,13 @@ async fn main() -> Result<()> {
 
     // Check for CLI subcommands
     let args: Vec<String> = std::env::args().collect();
+    let mut resume_override: Option<bool> = None;
     if args.len() > 1 {
         match args[1].as_str() {
+            "continue" => {
+                // Start the TUI and resume the latest session for this workspace (if any).
+                resume_override = Some(true);
+            }
             "index" => {
                 return run_index_command(&args[2..]).await;
             }
@@ -136,11 +141,13 @@ async fn main() -> Result<()> {
         memory,
     );
 
-    let resume = config
-        .general
-        .as_ref()
-        .and_then(|g| g.resume_last)
-        .unwrap_or(true);
+    let resume = resume_override.unwrap_or_else(|| {
+        config
+            .general
+            .as_ref()
+            .and_then(|g| g.resume_last)
+            .unwrap_or(false)
+    });
     app.init_session(resume);
 
     if config
@@ -187,7 +194,8 @@ fn print_help() {
     println!("Lorikeet - An autonomous coding agent");
     println!();
     println!("USAGE:");
-    println!("    lorikeet              Start the interactive TUI");
+    println!("    lorikeet              Start a new interactive TUI session");
+    println!("    lorikeet continue     Resume the latest session for this workspace");
     println!("    lorikeet index [DIR]  Index a directory for semantic search");
     println!("    lorikeet help         Show this help message");
     println!();
