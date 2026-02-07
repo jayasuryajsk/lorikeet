@@ -240,7 +240,10 @@ impl ToolOutput {
             "write_file" => "◀",
             "list_files" => "◇",
             "edit_file" => "±",
+            "apply_patch" => "▦",
+            "open_at" => "↗",
             "semantic_search" => "?",
+            "verify" => "✓",
             _ => "○",
         }
     }
@@ -262,8 +265,14 @@ impl ToolOutput {
             (&"list_files", _) => "Listed",
             (&"edit_file", ToolStatus::Running) => "Editing",
             (&"edit_file", _) => "Edited",
+            (&"apply_patch", ToolStatus::Running) => "Applying",
+            (&"apply_patch", _) => "Applied",
+            (&"open_at", ToolStatus::Running) => "Opening",
+            (&"open_at", _) => "Opened",
             (&"semantic_search", ToolStatus::Running) => "Searching",
             (&"semantic_search", _) => "Searched",
+            (&"verify", ToolStatus::Running) => "Verifying",
+            (&"verify", _) => "Verified",
             (_, ToolStatus::Running) => "Processing",
             (_, _) => "Done",
         }
@@ -293,7 +302,10 @@ Tools:
 - write_file: Write content to a file directly.
 - list_files: List directory contents directly.
 - edit_file: Make surgical edits to files. Args: path, old_string, new_string. The old_string must be unique in the file.
+- apply_patch: Apply a patch (*** Begin Patch / Update File / Add File / Delete File). Use for refactors and non-trivial edits.
+- open_at: Read a file around a specific line with context + line numbers. Use after search results (path:line).
 - semantic_search: Search code semantically using natural language. Returns ranked results with file:line. Use for finding code related to concepts, features, or functionality. Auto-indexes on first use.
+- verify: Run a verify command (tests/build). If omitted, auto-detects a suggestion. Respects sandbox.
 - memory_recall: Retrieve relevant long-term memory. Use before repeating actions or making risky changes.
 - memory_save: Save long-term memory about mistakes, preferences, and decisions. Never store secrets.
 - memory_list: List memories.
@@ -2156,6 +2168,14 @@ fn summarize_tool_call(name: &str, args: &serde_json::Value) -> String {
             let cmd = args.get("command").and_then(|v| v.as_str()).unwrap_or("");
             trunc(cmd, 120)
         }
+        "verify" => {
+            let cmd = args.get("command").and_then(|v| v.as_str()).unwrap_or("");
+            if cmd.trim().is_empty() {
+                "auto".to_string()
+            } else {
+                trunc(cmd, 120)
+            }
+        }
         "rg" => {
             let q = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
             let path = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
@@ -2168,6 +2188,20 @@ fn summarize_tool_call(name: &str, args: &serde_json::Value) -> String {
         "read_file" | "write_file" | "list_files" => {
             let path = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
             trunc(path, 140)
+        }
+        "open_at" => {
+            let path = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
+            let line = args.get("line").and_then(|v| v.as_u64()).unwrap_or(1);
+            trunc(&format!("{}:{}", path, line), 140)
+        }
+        "apply_patch" => {
+            let patch = args.get("patch").and_then(|v| v.as_str()).unwrap_or("");
+            if patch.trim().is_empty() {
+                "patch".to_string()
+            } else {
+                // Keep this short; full patch is visible in details with redaction.
+                "patch".to_string()
+            }
         }
         "edit_file" => {
             let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
@@ -2238,8 +2272,29 @@ fn sandbox_decision_for_tool(
             }
             SandboxDecision::allow()
         }
+        "verify" => {
+            let cmd = args.get("command").and_then(|v| v.as_str()).unwrap_or("");
+            // If omitted, tool will auto-detect; allow the tool to decide at runtime.
+            if cmd.trim().is_empty() {
+                return SandboxDecision::allow();
+            }
+            if let Err(e) = policy.check_command_allowed(cmd) {
+                return SandboxDecision::deny(e.to_string());
+            }
+            if let Err(e) = policy.check_bash_paths(cmd) {
+                return SandboxDecision::deny(e.to_string());
+            }
+            SandboxDecision::allow()
+        }
         "rg" => {
             let path = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
+            match policy.check_path_allowed(Path::new(path)) {
+                Ok(_) => SandboxDecision::allow(),
+                Err(e) => SandboxDecision::deny(e.to_string()),
+            }
+        }
+        "open_at" => {
+            let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
             match policy.check_path_allowed(Path::new(path)) {
                 Ok(_) => SandboxDecision::allow(),
                 Err(e) => SandboxDecision::deny(e.to_string()),
@@ -2258,6 +2313,27 @@ fn sandbox_decision_for_tool(
                 Ok(_) => SandboxDecision::allow(),
                 Err(e) => SandboxDecision::deny(e.to_string()),
             }
+        }
+        "apply_patch" => {
+            // Best-effort: scan for paths in the patch headers and validate them.
+            let patch = args.get("patch").and_then(|v| v.as_str()).unwrap_or("");
+            for line in patch.lines() {
+                let path = if let Some(p) = line.strip_prefix("*** Add File: ") {
+                    Some(p.trim())
+                } else if let Some(p) = line.strip_prefix("*** Update File: ") {
+                    Some(p.trim())
+                } else if let Some(p) = line.strip_prefix("*** Delete File: ") {
+                    Some(p.trim())
+                } else {
+                    None
+                };
+                if let Some(p) = path {
+                    if let Err(e) = policy.check_path_allowed(Path::new(p)) {
+                        return SandboxDecision::deny(e.to_string());
+                    }
+                }
+            }
+            SandboxDecision::allow()
         }
         _ => SandboxDecision::allow(),
     }

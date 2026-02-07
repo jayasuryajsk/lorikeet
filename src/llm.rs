@@ -244,6 +244,39 @@ fn get_tools() -> Vec<Tool> {
         Tool {
             tool_type: "function".into(),
             function: FunctionDef {
+                name: "apply_patch".into(),
+                description: "Apply a patch to one or more files. Prefer this for non-trivial edits/refactors. Patch format uses *** Begin Patch / *** Update File / *** Add File / *** Delete File / *** End Patch blocks with diff-style lines starting with ' ', '+', '-'.".into(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "patch": {
+                            "type": "string",
+                            "description": "Patch text to apply"
+                        }
+                    },
+                    "required": ["patch"]
+                }),
+            },
+        },
+        Tool {
+            tool_type: "function".into(),
+            function: FunctionDef {
+                name: "open_at".into(),
+                description: "Read a file around a specific 1-based line number with context and line numbers. Use after smart_search/rg when you have path:line results.".into(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "File path"},
+                        "line": {"type": "integer", "description": "1-based line number to center on"},
+                        "context": {"type": "integer", "description": "Lines of context before/after (default 40)"}
+                    },
+                    "required": ["path", "line"]
+                }),
+            },
+        },
+        Tool {
+            tool_type: "function".into(),
+            function: FunctionDef {
                 name: "semantic_search".into(),
                 description: "Search code semantically using natural language. Returns ranked results with file paths and line numbers. Use for finding code related to concepts, features, or functionality. Auto-indexes on first use.".into(),
                 parameters: serde_json::json!({
@@ -255,6 +288,20 @@ fn get_tools() -> Vec<Tool> {
                         }
                     },
                     "required": ["query"]
+                }),
+            },
+        },
+        Tool {
+            tool_type: "function".into(),
+            function: FunctionDef {
+                name: "verify".into(),
+                description: "Run the workspace verify command (tests/build). If command is omitted, auto-detects a suggestion. Respects sandbox allow_commands; if blocked, adjust sandbox allowlist.".into(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "command": {"type": "string", "description": "Optional verify command (e.g. 'cargo test', 'pnpm test')"}
+                    },
+                    "required": []
                 }),
             },
         },

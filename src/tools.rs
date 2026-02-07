@@ -15,12 +15,15 @@ use crate::semantic_search::{format_search_results, SearchConfig, SemanticSearch
 pub const TOOL_NAMES: &[&str] = &[
     "bash",
     "rg",
+    "smart_search",
     "read_file",
     "write_file",
     "list_files",
     "edit_file",
+    "apply_patch",
+    "open_at",
     "semantic_search",
-    "smart_search",
+    "verify",
     "memory_recall",
     "memory_save",
     "memory_list",
@@ -103,6 +106,55 @@ pub async fn execute_tool(
             }
 
             let (result, success) = execute_bash_streaming(command, call_id, tx.clone()).await;
+            let _ = tx.send(AppEvent::ToolComplete(crate::events::ToolCompleteEvent {
+                call_id: call_id.to_string(),
+                success,
+            }));
+            result
+        }
+        "verify" => {
+            let fail = |msg: String| {
+                let _ = tx.send(AppEvent::ToolOutput(crate::events::ToolOutputEvent {
+                    call_id: call_id.to_string(),
+                    chunk: msg.clone(),
+                }));
+                let _ = tx.send(AppEvent::ToolComplete(crate::events::ToolCompleteEvent {
+                    call_id: call_id.to_string(),
+                    success: false,
+                }));
+                msg
+            };
+
+            let cwd = match std::env::current_dir() {
+                Ok(dir) => dir,
+                Err(e) => return fail(format!("Error: cwd: {}", e)),
+            };
+
+            let mut command = args
+                .get("command")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            if command.trim().is_empty() {
+                let suggestions = crate::verify::detect_suggestions(&cwd);
+                if let Some(s) = suggestions.first() {
+                    command = s.command.clone();
+                } else {
+                    return fail(
+                        "Error: no verify suggestions for this workspace (pass {\"command\": ...})."
+                            .to_string(),
+                    );
+                }
+            }
+
+            if let Err(err) = policy.check_command_allowed(&command) {
+                return fail(err.to_string());
+            }
+            if let Err(err) = policy.check_bash_paths(&command) {
+                return fail(err.to_string());
+            }
+
+            let (result, success) = execute_bash_streaming(&command, call_id, tx.clone()).await;
             let _ = tx.send(AppEvent::ToolComplete(crate::events::ToolCompleteEvent {
                 call_id: call_id.to_string(),
                 success,
@@ -286,6 +338,53 @@ pub async fn execute_tool(
 
             let result = edit_file(&checked_path, old_str, new_str).await;
             let success = !result.starts_with("Error");
+            let _ = tx.send(AppEvent::ToolOutput(crate::events::ToolOutputEvent {
+                call_id: call_id.to_string(),
+                chunk: result.clone(),
+            }));
+            let _ = tx.send(AppEvent::ToolComplete(crate::events::ToolCompleteEvent {
+                call_id: call_id.to_string(),
+                success,
+            }));
+            result
+        }
+        "apply_patch" => {
+            let patch = args.get("patch").and_then(|v| v.as_str()).unwrap_or("");
+            let result = apply_patch_tool(patch, policy).await;
+            let success = !result.starts_with("Error:");
+            let _ = tx.send(AppEvent::ToolOutput(crate::events::ToolOutputEvent {
+                call_id: call_id.to_string(),
+                chunk: result.clone(),
+            }));
+            let _ = tx.send(AppEvent::ToolComplete(crate::events::ToolCompleteEvent {
+                call_id: call_id.to_string(),
+                success,
+            }));
+            result
+        }
+        "open_at" => {
+            let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
+            let line = args.get("line").and_then(|v| v.as_u64()).unwrap_or(1) as usize;
+            let context = args.get("context").and_then(|v| v.as_u64()).unwrap_or(40) as usize;
+
+            let checked_path = match policy.check_path_allowed(Path::new(path)) {
+                Ok(p) => p,
+                Err(err) => {
+                    let msg = err.to_string();
+                    let _ = tx.send(AppEvent::ToolOutput(crate::events::ToolOutputEvent {
+                        call_id: call_id.to_string(),
+                        chunk: msg.clone(),
+                    }));
+                    let _ = tx.send(AppEvent::ToolComplete(crate::events::ToolCompleteEvent {
+                        call_id: call_id.to_string(),
+                        success: false,
+                    }));
+                    return msg;
+                }
+            };
+
+            let result = open_at(&checked_path, line, context).await;
+            let success = !result.starts_with("Error:");
             let _ = tx.send(AppEvent::ToolOutput(crate::events::ToolOutputEvent {
                 call_id: call_id.to_string(),
                 chunk: result.clone(),
@@ -871,6 +970,285 @@ async fn execute_smart_search(
     ));
     out
 }
+
+async fn open_at(path: &Path, line: usize, context: usize) -> String {
+    let content = match tokio::fs::read_to_string(path).await {
+        Ok(c) => c,
+        Err(e) => return format!("Error: {}", e),
+    };
+
+    let lines: Vec<&str> = content.split('\n').collect();
+    if lines.is_empty() {
+        return format!("{}: (empty)", path.display());
+    }
+
+    let line = line.max(1);
+    let start = line.saturating_sub(context).max(1);
+    let end = (line + context).min(lines.len());
+
+    let mut out = String::new();
+    out.push_str(&format!("{}:{}\n", path.display(), line));
+
+    for cur in start..=end {
+        let text = lines.get(cur.saturating_sub(1)).copied().unwrap_or("");
+        let marker = if cur == line { ">" } else { " " };
+        out.push_str(&format!("{marker} {cur:5} | {text}\n"));
+    }
+
+    out
+}
+
+#[derive(Debug)]
+enum PatchOp {
+    Add { path: String, content: String },
+    Delete { path: String },
+    Update { path: String, diff: Vec<String> },
+}
+
+fn parse_patch_ops(patch: &str) -> Result<Vec<PatchOp>, String> {
+    let mut iter = patch.lines().peekable();
+    let mut ops = Vec::new();
+
+    if matches!(iter.peek().map(|s| s.trim()), Some("*** Begin Patch")) {
+        let _ = iter.next();
+    }
+
+    let mut cur_kind: Option<&'static str> = None;
+    let mut cur_path: Option<String> = None;
+    let mut buf: Vec<String> = Vec::new();
+
+    let flush = |cur_kind: &mut Option<&'static str>,
+                 cur_path: &mut Option<String>,
+                 buf: &mut Vec<String>,
+                 ops: &mut Vec<PatchOp>|
+     -> Result<(), String> {
+        let Some(kind) = cur_kind.take() else {
+            return Ok(());
+        };
+        let path = cur_path.take().unwrap_or_default();
+        let body = std::mem::take(buf);
+
+        match kind {
+            "add" => {
+                let mut out = String::new();
+                for l in body {
+                    let stripped = l
+                        .strip_prefix('+')
+                        .ok_or_else(|| format!("invalid add-file line (expected '+'): {}", l))?;
+                    out.push_str(stripped);
+                    out.push('\n');
+                }
+                ops.push(PatchOp::Add { path, content: out });
+            }
+            "delete" => ops.push(PatchOp::Delete { path }),
+            "update" => ops.push(PatchOp::Update { path, diff: body }),
+            _ => return Err(format!("unknown patch op: {}", kind)),
+        }
+        Ok(())
+    };
+
+    while let Some(line) = iter.next() {
+        if line.trim() == "*** End Patch" {
+            break;
+        }
+        if let Some(rest) = line.strip_prefix("*** Add File: ") {
+            flush(&mut cur_kind, &mut cur_path, &mut buf, &mut ops)?;
+            cur_kind = Some("add");
+            cur_path = Some(rest.trim().to_string());
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("*** Delete File: ") {
+            flush(&mut cur_kind, &mut cur_path, &mut buf, &mut ops)?;
+            cur_kind = Some("delete");
+            cur_path = Some(rest.trim().to_string());
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("*** Update File: ") {
+            flush(&mut cur_kind, &mut cur_path, &mut buf, &mut ops)?;
+            cur_kind = Some("update");
+            cur_path = Some(rest.trim().to_string());
+            continue;
+        }
+
+        if cur_kind.is_some() {
+            buf.push(line.to_string());
+        }
+    }
+
+    flush(&mut cur_kind, &mut cur_path, &mut buf, &mut ops)?;
+    Ok(ops)
+}
+
+fn normalize_line(s: &str) -> String {
+    s.strip_suffix('\r').unwrap_or(s).to_string()
+}
+
+fn apply_update_diff(original: &str, diff_lines: &[String]) -> Result<String, String> {
+    let mut old: Vec<String> = original.split('\n').map(normalize_line).collect();
+    let had_trailing_newline = original.ends_with('\n');
+
+    let mut hunks: Vec<Vec<String>> = Vec::new();
+    let mut cur: Vec<String> = Vec::new();
+    for l in diff_lines {
+        if l.starts_with("@@") {
+            if !cur.is_empty() {
+                hunks.push(std::mem::take(&mut cur));
+            }
+            continue;
+        }
+        if l.starts_with("***") {
+            continue;
+        }
+        cur.push(l.clone());
+    }
+    if !cur.is_empty() {
+        hunks.push(cur);
+    }
+    if hunks.is_empty() {
+        return Ok(original.to_string());
+    }
+
+    let mut cursor: usize = 0;
+    for hunk in hunks {
+        let mut expected: Vec<String> = Vec::new();
+        for l in &hunk {
+            let Some(prefix) = l.chars().next() else {
+                return Err("invalid diff line".to_string());
+            };
+            match prefix {
+                ' ' | '-' => expected.push(normalize_line(&l[1..])),
+                '+' => {}
+                _ => return Err(format!("invalid diff prefix: {}", l)),
+            }
+        }
+
+        let at = if expected.is_empty() {
+            cursor.min(old.len())
+        } else {
+            let mut found: Option<usize> = None;
+            for i in cursor..=old.len().saturating_sub(expected.len()) {
+                if old[i..i + expected.len()] == expected {
+                    found = Some(i);
+                    break;
+                }
+            }
+            found.ok_or_else(|| "hunk context not found".to_string())?
+        };
+
+        let mut replacement: Vec<String> = Vec::new();
+        for l in &hunk {
+            let prefix = l.chars().next().unwrap_or(' ');
+            match prefix {
+                ' ' => replacement.push(normalize_line(&l[1..])),
+                '-' => {}
+                '+' => replacement.push(normalize_line(&l[1..])),
+                _ => {}
+            }
+        }
+
+        let end = at + expected.len();
+        old.splice(at..end, replacement.iter().cloned());
+        cursor = at + replacement.len();
+    }
+
+    let mut out = old.join("\n");
+    if had_trailing_newline && !out.ends_with('\n') {
+        out.push('\n');
+    }
+    Ok(out)
+}
+
+async fn apply_patch_tool(patch: &str, policy: &SandboxPolicy) -> String {
+    if patch.trim().is_empty() {
+        return "Error: patch cannot be empty".to_string();
+    }
+
+    let ops = match parse_patch_ops(patch) {
+        Ok(ops) => ops,
+        Err(e) => return format!("Error: {}", e),
+    };
+    if ops.is_empty() {
+        return "Error: patch contained no operations".to_string();
+    }
+
+    // Preflight: all paths must be allowed.
+    for op in &ops {
+        let p = match op {
+            PatchOp::Add { path, .. } => path,
+            PatchOp::Delete { path } => path,
+            PatchOp::Update { path, .. } => path,
+        };
+        if p.starts_with('/') || p.contains("..") {
+            return format!("Error: invalid patch path: {}", p);
+        }
+        if let Err(e) = policy.check_path_allowed(Path::new(p)) {
+            return e.to_string();
+        }
+    }
+
+    let mut added = 0usize;
+    let mut updated = 0usize;
+    let mut deleted = 0usize;
+    let mut out = String::new();
+
+    for op in ops {
+        match op {
+            PatchOp::Add { path, content } => {
+                let Ok(checked) = policy.check_path_allowed(Path::new(&path)) else {
+                    return format!("Error: sandbox blocked: {}", path);
+                };
+                if checked.exists() {
+                    return format!("Error: file already exists: {}", checked.display());
+                }
+                if let Some(parent) = checked.parent() {
+                    if let Err(e) = tokio::fs::create_dir_all(parent).await {
+                        return format!("Error: {}", e);
+                    }
+                }
+                if let Err(e) = tokio::fs::write(&checked, content).await {
+                    return format!("Error: {}", e);
+                }
+                added += 1;
+                out.push_str(&format!("Added {}\n", path));
+            }
+            PatchOp::Delete { path } => {
+                let Ok(checked) = policy.check_path_allowed(Path::new(&path)) else {
+                    return format!("Error: sandbox blocked: {}", path);
+                };
+                if let Err(e) = tokio::fs::remove_file(&checked).await {
+                    return format!("Error: {}", e);
+                }
+                deleted += 1;
+                out.push_str(&format!("Deleted {}\n", path));
+            }
+            PatchOp::Update { path, diff } => {
+                let Ok(checked) = policy.check_path_allowed(Path::new(&path)) else {
+                    return format!("Error: sandbox blocked: {}", path);
+                };
+                let content = match tokio::fs::read_to_string(&checked).await {
+                    Ok(c) => c,
+                    Err(e) => return format!("Error: {}", e),
+                };
+                let next = match apply_update_diff(&content, &diff) {
+                    Ok(n) => n,
+                    Err(e) => return format!("Error: {} ({})", path, e),
+                };
+                if let Err(e) = tokio::fs::write(&checked, next).await {
+                    return format!("Error: {}", e);
+                }
+                updated += 1;
+                out.push_str(&format!("Updated {}\n", path));
+            }
+        }
+    }
+
+    out.push_str(&format!(
+        "\nSummary: {} added, {} updated, {} deleted",
+        added, updated, deleted
+    ));
+    out
+}
+
 /// Set the project root for semantic search (called when starting the app)
 #[allow(dead_code)]
 pub fn set_semantic_search_project_root(path: PathBuf) {
