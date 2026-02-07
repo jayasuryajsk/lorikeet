@@ -235,6 +235,7 @@ impl ToolOutput {
         match self.tool.as_str() {
             "bash" => "$",
             "rg" => "⌕",
+            "smart_search" => "≈",
             "read_file" => "▶",
             "write_file" => "◀",
             "list_files" => "◇",
@@ -251,6 +252,8 @@ impl ToolOutput {
             (&"bash", _) => "Ran",
             (&"rg", ToolStatus::Running) => "Searching",
             (&"rg", _) => "Searched",
+            (&"smart_search", ToolStatus::Running) => "Searching",
+            (&"smart_search", _) => "Searched",
             (&"read_file", ToolStatus::Running) => "Reading",
             (&"read_file", _) => "Read",
             (&"write_file", ToolStatus::Running) => "Writing",
@@ -285,6 +288,7 @@ const SYSTEM_PROMPT: &str = r#"You are Lorikeet, an autonomous coding agent.
 Tools:
 - bash: Run any shell command. Use for reading files (cat), listing dirs (ls), git, builds, tests, etc.
 - rg: Fast exact text search across files. Use for symbols, strings, or precise matches.
+- smart_search: Combined search (rg + semantic). Use when you don't know exact identifiers; returns ranked hits.
 - read_file: Read file contents directly.
 - write_file: Write content to a file directly.
 - list_files: List directory contents directly.
@@ -2184,6 +2188,15 @@ fn summarize_tool_call(name: &str, args: &serde_json::Value) -> String {
             let q = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
             trunc(q, 140)
         }
+        "smart_search" => {
+            let q = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
+            let path = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
+            if q.is_empty() {
+                format!("in {}", path)
+            } else {
+                trunc(&format!("{} in {}", q, path), 140)
+            }
+        }
         "memory_recall" => {
             let q = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
             trunc(&format!("recall: {}", q), 140)
@@ -2226,6 +2239,13 @@ fn sandbox_decision_for_tool(
             SandboxDecision::allow()
         }
         "rg" => {
+            let path = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
+            match policy.check_path_allowed(Path::new(path)) {
+                Ok(_) => SandboxDecision::allow(),
+                Err(e) => SandboxDecision::deny(e.to_string()),
+            }
+        }
+        "smart_search" => {
             let path = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
             match policy.check_path_allowed(Path::new(path)) {
                 Ok(_) => SandboxDecision::allow(),

@@ -20,6 +20,7 @@ pub const TOOL_NAMES: &[&str] = &[
     "list_files",
     "edit_file",
     "semantic_search",
+    "smart_search",
     "memory_recall",
     "memory_save",
     "memory_list",
@@ -299,6 +300,32 @@ pub async fn execute_tool(
             let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
 
             let result = execute_semantic_search(query, policy).await;
+            let success = !result.starts_with("Error");
+            let _ = tx.send(AppEvent::ToolOutput(crate::events::ToolOutputEvent {
+                call_id: call_id.to_string(),
+                chunk: result.clone(),
+            }));
+            let _ = tx.send(AppEvent::ToolComplete(crate::events::ToolCompleteEvent {
+                call_id: call_id.to_string(),
+                success,
+            }));
+            result
+        }
+        "smart_search" => {
+            let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
+            let path = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
+            let limit = args
+                .get("limit")
+                .and_then(|v| v.as_u64())
+                .map(|v| v as usize);
+            let use_rg = args.get("rg").and_then(|v| v.as_bool()).unwrap_or(true);
+            let use_semantic = args
+                .get("semantic")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
+
+            let result =
+                execute_smart_search(query, path, limit, use_rg, use_semantic, policy).await;
             let success = !result.starts_with("Error");
             let _ = tx.send(AppEvent::ToolOutput(crate::events::ToolOutputEvent {
                 call_id: call_id.to_string(),
@@ -600,6 +627,250 @@ async fn execute_semantic_search(query: &str, policy: &SandboxPolicy) -> String 
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SmartSource {
+    Rg,
+    Semantic,
+    Both,
+}
+
+#[derive(Debug, Clone)]
+struct SmartHit {
+    source: SmartSource,
+    score: f32, // higher is better
+    path: String,
+    line: usize,
+    col: Option<usize>,
+    snippet: String,
+}
+
+fn trunc_line(s: &str, max: usize) -> String {
+    let t = s.trim();
+    if t.len() <= max {
+        return t.to_string();
+    }
+    let mut out = t.to_string();
+    out.truncate(max.saturating_sub(3));
+    out.push_str("...");
+    out
+}
+
+fn first_snippet(text: &str) -> String {
+    for l in text.lines() {
+        let t = l.trim();
+        if !t.is_empty() {
+            return trunc_line(t, 140);
+        }
+    }
+    String::new()
+}
+
+fn parse_rg_line(line: &str) -> Option<(String, usize, usize, String)> {
+    // Expected: path:line:col:text
+    let mut parts = line.splitn(4, ':');
+    let path = parts.next()?.to_string();
+    let line_no = parts.next()?.parse::<usize>().ok()?;
+    let col = parts.next()?.parse::<usize>().ok()?;
+    let text = parts.next().unwrap_or("").to_string();
+    Some((path, line_no, col, text))
+}
+
+async fn execute_smart_search(
+    query: &str,
+    path: &str,
+    limit: Option<usize>,
+    use_rg: bool,
+    use_semantic: bool,
+    policy: &SandboxPolicy,
+) -> String {
+    if query.trim().is_empty() {
+        return "Error: query cannot be empty".to_string();
+    }
+
+    let workspace_root = match std::env::current_dir() {
+        Ok(d) => d,
+        Err(e) => return format!("Error: cwd: {}", e),
+    };
+
+    let checked_scope = match policy.check_path_allowed(Path::new(path)) {
+        Ok(p) => p,
+        Err(e) => return e.to_string(),
+    };
+
+    // Scope prefix for filtering semantic hits (index uses workspace-root-relative paths).
+    let scope_rel: PathBuf = if checked_scope == workspace_root {
+        PathBuf::from(".")
+    } else if let Ok(rel) = checked_scope.strip_prefix(&workspace_root) {
+        rel.to_path_buf()
+    } else {
+        // Fallback: treat as '.' to avoid filtering out everything.
+        PathBuf::from(".")
+    };
+
+    let limit = limit.unwrap_or(20).clamp(1, 50);
+
+    let mut hits_by_key: std::collections::HashMap<(String, usize), SmartHit> =
+        std::collections::HashMap::new();
+
+    let mut rg_count = 0usize;
+    let mut sem_count = 0usize;
+
+    if use_rg {
+        let out = execute_rg(query, checked_scope.to_string_lossy().as_ref(), None).await;
+        if !out.starts_with("Error:") && !out.starts_with("No matches") {
+            for l in out.lines() {
+                if let Some((p, line_no, col, text)) = parse_rg_line(l) {
+                    rg_count += 1;
+                    let key = (p.clone(), line_no);
+                    let snippet = first_snippet(&text);
+                    let candidate = SmartHit {
+                        source: SmartSource::Rg,
+                        score: 0.80, // base; BOTH will be boosted.
+                        path: p,
+                        line: line_no,
+                        col: Some(col),
+                        snippet,
+                    };
+                    hits_by_key
+                        .entry(key)
+                        .and_modify(|h| {
+                            // Keep best version.
+                            if h.source == SmartSource::Semantic {
+                                h.source = SmartSource::Both;
+                                h.score = h.score.max(0.95);
+                                if h.snippet.is_empty() {
+                                    h.snippet = candidate.snippet.clone();
+                                }
+                                if h.col.is_none() {
+                                    h.col = candidate.col;
+                                }
+                            } else if candidate.score > h.score {
+                                *h = candidate.clone();
+                            }
+                        })
+                        .or_insert(candidate);
+                }
+            }
+        }
+    }
+
+    if use_semantic {
+        // Initialize or get the semantic search engine (workspace-scoped index dir).
+        let checked_root = match policy.check_path_allowed(&workspace_root) {
+            Ok(p) => p,
+            Err(e) => return e.to_string(),
+        };
+
+        let search_mutex = get_semantic_search();
+        let mut search_guard = search_mutex.lock();
+        if search_guard.is_none() {
+            let cfg = SearchConfig::for_workspace(&checked_root);
+            match SemanticSearch::new(cfg) {
+                Ok(search) => {
+                    search.set_project_root(checked_root.clone());
+                    *search_guard = Some(search);
+                }
+                Err(e) => return format!("Error initializing semantic search: {}", e),
+            }
+        }
+        let search = search_guard.as_ref().unwrap();
+
+        match search.search(query) {
+            Ok(results) => {
+                for r in results {
+                    let rel_path = r.chunk.metadata.file_path.clone();
+                    if scope_rel != PathBuf::from(".") && !rel_path.starts_with(&scope_rel) {
+                        continue;
+                    }
+                    sem_count += 1;
+
+                    let p = rel_path.to_string_lossy().to_string();
+                    let line_no = r.chunk.metadata.start_line.max(1);
+                    let key = (p.clone(), line_no);
+                    let snippet = first_snippet(&r.chunk.content);
+                    let candidate = SmartHit {
+                        source: SmartSource::Semantic,
+                        score: r.score, // 0..1
+                        path: p,
+                        line: line_no,
+                        col: None,
+                        snippet,
+                    };
+
+                    hits_by_key
+                        .entry(key)
+                        .and_modify(|h| {
+                            if h.source == SmartSource::Rg {
+                                h.source = SmartSource::Both;
+                                h.score = h.score.max(0.95);
+                                if h.snippet.is_empty() {
+                                    h.snippet = candidate.snippet.clone();
+                                }
+                            } else if candidate.score > h.score {
+                                *h = candidate.clone();
+                            }
+                        })
+                        .or_insert(candidate);
+                }
+            }
+            Err(e) => return format!("Error searching: {}", e),
+        }
+    }
+
+    let deduped_total = hits_by_key.len();
+    if deduped_total == 0 {
+        return "No results.".to_string();
+    }
+
+    let mut hits: Vec<SmartHit> = hits_by_key.into_values().collect();
+    hits.sort_by(|a, b| {
+        let pri = |s: SmartSource| match s {
+            SmartSource::Both => 0,
+            SmartSource::Rg => 1,
+            SmartSource::Semantic => 2,
+        };
+        pri(a.source)
+            .cmp(&pri(b.source))
+            .then_with(|| {
+                b.score
+                    .partial_cmp(&a.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .then_with(|| a.path.cmp(&b.path))
+            .then_with(|| a.line.cmp(&b.line))
+    });
+    hits.truncate(limit);
+    let shown = hits.len();
+
+    let mut out = String::new();
+    for h in hits {
+        let tag = match h.source {
+            SmartSource::Both => "BOTH",
+            SmartSource::Rg => "RG",
+            SmartSource::Semantic => "SEM",
+        };
+        let loc = if let Some(c) = h.col {
+            format!("{}:{}:{}", h.path, h.line, c)
+        } else {
+            format!("{}:{}", h.path, h.line)
+        };
+        let snippet = if h.snippet.is_empty() {
+            "".to_string()
+        } else {
+            format!("  {}", h.snippet)
+        };
+        out.push_str(&format!(
+            "{:<4} score={:.2}  {}{}\n",
+            tag, h.score, loc, snippet
+        ));
+    }
+
+    out.push_str(&format!(
+        "\n(counts: rg={} sem={} deduped={} shown={})",
+        rg_count, sem_count, deduped_total, shown
+    ));
+    out
+}
 /// Set the project root for semantic search (called when starting the app)
 #[allow(dead_code)]
 pub fn set_semantic_search_project_root(path: PathBuf) {

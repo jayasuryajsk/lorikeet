@@ -131,6 +131,39 @@ fn get_tools() -> Vec<Tool> {
         Tool {
             tool_type: "function".into(),
             function: FunctionDef {
+                name: "smart_search".into(),
+                description: "Combined search: runs ripgrep (exact) + semantic search (meaning) and returns a merged, ranked list. Prefer this when you don't know exact symbol names.".into(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "What to search for (natural language or exact text)"
+                        },
+                        "path": {
+                            "type": "string",
+                            "description": "Optional scope within the workspace (directory or file). Defaults to current directory."
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "Max number of results to return (default 20, max 50)"
+                        },
+                        "rg": {
+                            "type": "boolean",
+                            "description": "Whether to run rg (default true)"
+                        },
+                        "semantic": {
+                            "type": "boolean",
+                            "description": "Whether to run semantic search (default true)"
+                        }
+                    },
+                    "required": ["query"]
+                }),
+            },
+        },
+        Tool {
+            tool_type: "function".into(),
+            function: FunctionDef {
                 name: "read_file".into(),
                 description: "Read the contents of a file at the given path.".into(),
                 parameters: serde_json::json!({
