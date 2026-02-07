@@ -91,20 +91,21 @@ fn default_extension_category(ext: &str) -> Option<&'static str> {
 fn default_category_style(category: &str) -> Style {
     match category {
         "directory" => Style::default()
-            .fg(Color::Cyan)
+            .fg(Color::Blue)
             .add_modifier(Modifier::BOLD),
         "hidden" => Style::default()
             .fg(Color::DarkGray)
             .add_modifier(Modifier::ITALIC),
         "docs" => Style::default()
-            .fg(Color::Green)
+            .fg(Color::Magenta)
             .add_modifier(Modifier::ITALIC),
-        "config" => Style::default().fg(Color::Magenta),
-        "script" => Style::default().fg(Color::Rgb(190, 242, 100)),
-        "web" => Style::default().fg(Color::Yellow),
-        "data" => Style::default().fg(Color::Rgb(125, 211, 252)),
-        "code" => Style::default().fg(Color::Rgb(200, 200, 200)),
-        _ => Style::default().fg(Color::Rgb(200, 200, 200)),
+        "config" => Style::default().fg(Color::Yellow),
+        "script" => Style::default().fg(Color::Green),
+        "web" => Style::default().fg(Color::Cyan),
+        "data" => Style::default().fg(Color::Blue),
+        // Use terminal default for code/default so it's readable in both dark + light themes.
+        "code" => Style::default().fg(Color::Reset),
+        _ => Style::default().fg(Color::Reset),
     }
 }
 

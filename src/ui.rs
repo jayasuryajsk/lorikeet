@@ -17,6 +17,20 @@ const INDEXING_SPINNER: &[&str] = &["⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "�
 const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const TOOL_SPINNER_FRAMES: &[&str] = &["◐", "◓", "◑", "◒"];
 
+// Styling helpers that work on both dark and light terminal themes.
+fn ghost_style() -> Style {
+    Style::default()
+        .fg(Color::DarkGray)
+        .add_modifier(Modifier::ITALIC)
+        .add_modifier(Modifier::DIM)
+}
+
+fn meta_style() -> Style {
+    Style::default()
+        .fg(Color::DarkGray)
+        .add_modifier(Modifier::DIM)
+}
+
 pub fn ui(frame: &mut Frame, app: &mut App) {
     app.root_area = frame.area();
     let split_ratio = app.split_ratio.max(20).min(80);
@@ -87,10 +101,7 @@ pub fn ui(frame: &mut Frame, app: &mut App) {
                 let wrap_width = chat_width.saturating_sub(2);
                 for chunk in chars.chunks(wrap_width) {
                     let text: String = chunk.iter().collect();
-                    all_lines.push(Line::from(Span::styled(
-                        text,
-                        Style::default().fg(Color::Rgb(160, 160, 160)),
-                    )));
+                    all_lines.push(Line::from(Span::styled(text, ghost_style())));
                 }
             }
         }
@@ -161,10 +172,7 @@ pub fn ui(frame: &mut Frame, app: &mut App) {
                 let wrap_width = chat_width.saturating_sub(2);
                 for chunk in chars.chunks(wrap_width) {
                     let text: String = chunk.iter().collect();
-                    all_lines.push(Line::from(Span::styled(
-                        text,
-                        Style::default().fg(Color::Rgb(160, 160, 160)),
-                    )));
+                    all_lines.push(Line::from(Span::styled(text, ghost_style())));
                 }
             }
         }
@@ -315,7 +323,7 @@ pub fn ui(frame: &mut Frame, app: &mut App) {
         status_text.push_str(" (/verify)");
     }
 
-    let status = Paragraph::new(status_text).style(Style::default().fg(Color::DarkGray));
+    let status = Paragraph::new(status_text).style(meta_style());
     frame.render_widget(status, left_chunks[2]);
 
     // Context sidebar (right pane)
@@ -391,7 +399,7 @@ fn render_settings_popup(frame: &mut Frame, app: &mut App) {
         let style = if is_selected {
             Style::default().fg(Color::Black).bg(Color::Gray)
         } else {
-            Style::default().fg(Color::White)
+            Style::default().fg(Color::Reset)
         };
         lines.push(Line::from(Span::styled(
             format!("{}{}", prefix, trimmed),
@@ -459,7 +467,7 @@ fn render_tool_group_inline(
         Span::raw("  "),
         Span::styled(
             format!("{} Tool Trace ({}) ", disclosure, tools.len()),
-            Style::default().fg(Color::Rgb(210, 210, 210)).bold(),
+            Style::default().fg(Color::Reset).bold(),
         ),
         Span::styled(
             status,
@@ -538,13 +546,13 @@ fn render_tool_trace_item(
             Style::default()
                 .fg(match tool.status {
                     ToolStatus::Running => Color::Yellow,
-                    ToolStatus::Success => Color::White,
+                    ToolStatus::Success => Color::Reset,
                     ToolStatus::Error => Color::Red,
                 })
                 .bold(),
         ),
-        Span::styled(args, Style::default().fg(Color::Rgb(220, 220, 220))),
-        Span::styled(suffix, Style::default().fg(Color::Rgb(160, 160, 160))),
+        Span::styled(args, Style::default().fg(Color::Reset)),
+        Span::styled(suffix, meta_style()),
     ]));
 
     let want_details = (group_expanded && show_details) || tool.status == ToolStatus::Error;
@@ -578,14 +586,14 @@ fn render_tool_trace_item(
         if !tool.args_pretty_lines.is_empty() {
             out.push(Line::from(vec![
                 Span::raw("  └ input: "),
-                Span::styled("{", Style::default().fg(Color::Rgb(160, 160, 160))),
+                Span::styled("{", meta_style()),
             ]));
             for l in tool.args_pretty_lines.iter().take(MAX_INPUT_LINES) {
                 out.push(Line::from(vec![
                     Span::raw("    "),
                     Span::styled(
                         truncate_to_width(l, chat_width.saturating_sub(4)),
-                        Style::default().fg(Color::Rgb(160, 160, 160)),
+                        meta_style(),
                     ),
                 ]));
             }
@@ -597,7 +605,7 @@ fn render_tool_trace_item(
                             "… {} more lines",
                             tool.args_pretty_lines.len() - MAX_INPUT_LINES
                         ),
-                        Style::default().fg(Color::Rgb(160, 160, 160)),
+                        meta_style(),
                     ),
                 ]));
             }
@@ -620,7 +628,7 @@ fn render_tool_trace_item(
                                 "… {}",
                                 truncate_to_width(last, chat_width.saturating_sub(6))
                             ),
-                            Style::default().fg(Color::Rgb(170, 170, 170)),
+                            meta_style(),
                         ),
                     ]));
                 }
@@ -683,10 +691,7 @@ fn render_tool_trace_item(
     if remaining > 0 || tool.output_is_truncated() {
         out.push(Line::from(vec![
             Span::raw("        "),
-            Span::styled(
-                format!("… {} more lines", remaining),
-                Style::default().fg(Color::Rgb(160, 160, 160)),
-            ),
+            Span::styled(format!("… {} more lines", remaining), meta_style()),
         ]));
     }
 }
@@ -713,14 +718,14 @@ fn render_context_sidebar(frame: &mut Frame, app: &mut App, area: Rect) {
     let mut lines: Vec<Line> = Vec::new();
 
     lines.push(Line::from(vec![
-        Span::styled("Workspace: ", Style::default().fg(Color::DarkGray)),
+        Span::styled("Workspace: ", meta_style()),
         Span::raw(truncate_to_width(
             &app.workspace_root_display(),
             width.saturating_sub(11),
         )),
     ]));
     lines.push(Line::from(vec![
-        Span::styled("Model: ", Style::default().fg(Color::DarkGray)),
+        Span::styled("Model: ", meta_style()),
         Span::raw(truncate_to_width(&app.model, width.saturating_sub(7))),
     ]));
 
@@ -731,35 +736,29 @@ fn render_context_sidebar(frame: &mut Frame, app: &mut App, area: Rect) {
         .and_then(|s| s.enabled)
         .unwrap_or(true);
     lines.push(Line::from(vec![
-        Span::styled("Sandbox: ", Style::default().fg(Color::DarkGray)),
+        Span::styled("Sandbox: ", meta_style()),
         Span::raw(if sandbox_enabled { "on" } else { "off" }),
     ]));
 
     if !app.verify_suggestions.is_empty() {
         lines.push(Line::from(""));
         lines.push(Line::from(vec![
-            Span::styled("Verify: ", Style::default().fg(Color::DarkGray)),
+            Span::styled("Verify: ", meta_style()),
             Span::raw(truncate_to_width(
                 &app.verify_suggestions[0].command,
                 width.saturating_sub(8),
             )),
         ]));
-        lines.push(Line::from(Span::styled(
-            "Run: /verify",
-            Style::default().fg(Color::DarkGray),
-        )));
+        lines.push(Line::from(Span::styled("Run: /verify", meta_style())));
     }
 
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
         "Recent files",
-        Style::default().fg(Color::DarkGray).bold(),
+        Style::default().fg(Color::Reset).bold(),
     )));
     if app.recent_files.is_empty() {
-        lines.push(Line::from(Span::styled(
-            "(none yet)",
-            Style::default().fg(Color::Rgb(160, 160, 160)),
-        )));
+        lines.push(Line::from(Span::styled("(none yet)", meta_style())));
     } else {
         for p in app.recent_files.iter().take(10) {
             lines.push(Line::from(vec![
@@ -839,10 +838,7 @@ fn highlight_markdown_line(line: &str) -> Vec<Span<'static>> {
         )];
     }
     if trimmed.starts_with('>') {
-        return vec![Span::styled(
-            line.to_string(),
-            Style::default().fg(Color::Rgb(160, 160, 160)),
-        )];
+        return vec![Span::styled(line.to_string(), meta_style())];
     }
 
     let mut spans = Vec::new();

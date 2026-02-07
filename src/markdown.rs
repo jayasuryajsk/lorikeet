@@ -25,11 +25,13 @@ pub struct Theme {
 impl Theme {
     pub fn agent() -> Self {
         Self {
-            text: Color::White,
+            // Use terminal default so this works on both dark and light terminal themes.
+            text: Color::Reset,
             bold: Color::Rgb(217, 119, 87),
-            italic: Color::Gray,
-            code: Color::Yellow,
-            code_bg: Color::Rgb(40, 40, 40),
+            italic: Color::DarkGray,
+            code: Color::Blue,
+            // Avoid hard-coded dark backgrounds (looks awful on light terminals).
+            code_bg: Color::Reset,
             heading: Color::Rgb(217, 119, 87),
             heading2: Color::Rgb(191, 103, 74),
             heading3: Color::DarkGray,
@@ -50,8 +52,8 @@ impl Theme {
             text: Color::Cyan,
             bold: Color::LightCyan,
             italic: Color::Cyan,
-            code: Color::Yellow,
-            code_bg: Color::Rgb(40, 40, 40),
+            code: Color::Blue,
+            code_bg: Color::Reset,
             heading: Color::LightCyan,
             heading2: Color::Cyan,
             heading3: Color::DarkGray,
@@ -81,7 +83,11 @@ fn style_for_state(theme: Theme, state: StyleState) -> Style {
     let mut style = Style::default().fg(theme.text);
 
     if state.code {
-        style = style.fg(theme.code).bg(theme.code_bg);
+        // Prefer high-contrast foreground; background stays terminal default.
+        style = style
+            .fg(theme.code)
+            .bg(theme.code_bg)
+            .add_modifier(Modifier::BOLD);
     }
 
     if state.link {
