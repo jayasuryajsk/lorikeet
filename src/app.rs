@@ -384,6 +384,10 @@ pub struct App {
     // Tool run index
     tool_index_by_call_id: HashMap<String, usize>,
 
+    // Tool loop guard (prevents infinite retries on repeated failures)
+    tool_failure_counts: HashMap<(u64, String), usize>,
+    tool_loop_abort: Option<(u64, String)>, // (turn_id, message)
+
     // Context sidebar
     pub recent_files: VecDeque<String>,
     pub last_searches: VecDeque<String>,
@@ -476,6 +480,8 @@ impl App {
             tool_trace_expanded: HashMap::new(),
             tool_trace_show_details: HashMap::new(),
             tool_index_by_call_id: HashMap::new(),
+            tool_failure_counts: HashMap::new(),
+            tool_loop_abort: None,
             recent_files: VecDeque::new(),
             last_searches: VecDeque::new(),
             indexing_status: load_existing_index_status(),
@@ -496,6 +502,8 @@ impl App {
                     self.tool_trace_expanded.clear();
                     self.tool_trace_show_details.clear();
                     self.tool_index_by_call_id.clear();
+                    self.tool_failure_counts.clear();
+                    self.tool_loop_abort = None;
                     self.tool_group_by_call_id.clear();
                     self.last_tool_group_id = None;
                     self.next_tool_group_id = 1;
@@ -1294,6 +1302,8 @@ impl App {
             self.tool_group_by_call_id.clear();
             self.tool_trace_expanded.clear();
             self.tool_trace_show_details.clear();
+            self.tool_failure_counts.clear();
+            self.tool_loop_abort = None;
             self.recent_files.clear();
             self.last_searches.clear();
             self.turn_user_message = None;
@@ -1869,6 +1879,23 @@ impl App {
                     });
                 }
 
+                // If we detected an infinite tool retry loop, stop here and require user input.
+                if let Some((turn_id, msg)) = self.tool_loop_abort.take() {
+                    if turn_id == self.current_turn_id {
+                        self.messages.push(Message {
+                            role: Role::Agent,
+                            content: msg,
+                            reasoning: None,
+                            tool_calls: None,
+                            tool_group_id: None,
+                        });
+                        self.scroll_messages_to_bottom();
+                        self.is_processing = false;
+                        self.processing_start = None;
+                        return;
+                    }
+                }
+
                 // Continue the conversation
                 self.start_llm_call();
             }
@@ -1970,6 +1997,23 @@ impl App {
                             .any(|t| t.group_id == group_id && t.status == ToolStatus::Running);
                         if !any_running {
                             self.tool_trace_expanded.insert(group_id, false);
+                        }
+                    }
+
+                    // Tool loop guard: if the same tool keeps failing with the same target in one turn,
+                    // stop retrying and force the user/model to correct course.
+                    if !success {
+                        let key = (self.current_turn_id, format!("{}|{}", tool, target));
+                        let count = self.tool_failure_counts.entry(key).or_insert(0);
+                        *count = count.saturating_add(1);
+                        if *count >= 3 && self.tool_loop_abort.is_none() {
+                            self.tool_loop_abort = Some((
+                                self.current_turn_id,
+                                format!(
+                                    "Tool loop detected: `{}` kept failing on `{}`. Stopping retries. Please provide the exact path/command or clarify the request.",
+                                    tool, target
+                                ),
+                            ));
                         }
                     }
 

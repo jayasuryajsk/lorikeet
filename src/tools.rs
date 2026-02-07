@@ -37,6 +37,81 @@ fn get_semantic_search() -> &'static Mutex<Option<SemanticSearch>> {
     SEMANTIC_SEARCH.get_or_init(|| Mutex::new(None))
 }
 
+fn extract_string_from_jsonish(s: &str) -> Option<String> {
+    let t = s.trim();
+    if t.is_empty() {
+        return None;
+    }
+
+    // If the model accidentally stringifies JSON (e.g. "[\"foo\"]" or "[[\"foo\"]]"),
+    // parse it and extract the first string leaf.
+    if t.starts_with('[') || t.starts_with('{') || (t.starts_with('"') && t.ends_with('"')) {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(t) {
+            fn first_string(v: &serde_json::Value) -> Option<String> {
+                match v {
+                    serde_json::Value::String(s) => Some(s.clone()),
+                    serde_json::Value::Array(arr) => arr.iter().find_map(first_string),
+                    serde_json::Value::Object(map) => map.values().find_map(first_string),
+                    _ => None,
+                }
+            }
+            if let Some(s) = first_string(&v) {
+                return Some(s);
+            }
+        }
+    }
+
+    None
+}
+
+fn string_arg(args: &serde_json::Value, key: &str) -> String {
+    let v = args.get(key);
+    let mut s = match v {
+        Some(serde_json::Value::String(s)) => s.clone(),
+        Some(serde_json::Value::Array(arr)) => arr
+            .iter()
+            .filter_map(|x| x.as_str())
+            .next()
+            .unwrap_or("")
+            .to_string(),
+        Some(serde_json::Value::Number(n)) => n.to_string(),
+        Some(serde_json::Value::Bool(b)) => b.to_string(),
+        Some(serde_json::Value::Null) | None => String::new(),
+        Some(other) => other.to_string(),
+    };
+
+    // Common: model sends a JSON-ish string inside a string.
+    if let Some(extracted) = extract_string_from_jsonish(&s) {
+        s = extracted;
+    }
+
+    // Strip surrounding quotes (best-effort).
+    let t = s.trim();
+    if (t.starts_with('"') && t.ends_with('"')) || (t.starts_with('\'') && t.ends_with('\'')) {
+        return t[1..t.len().saturating_sub(1)].to_string();
+    }
+    t.to_string()
+}
+
+fn command_arg(args: &serde_json::Value, key: &str) -> String {
+    let mut s = string_arg(args, key);
+
+    // Support JSON array-of-strings commands like ["rg","-n","foo"] (model sometimes does this).
+    let t = s.trim();
+    if t.starts_with('[') && t.ends_with(']') {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(t) {
+            if let Some(arr) = v.as_array() {
+                let parts = arr.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>();
+                if !parts.is_empty() {
+                    s = parts.join(" ");
+                }
+            }
+        }
+    }
+
+    s
+}
+
 pub async fn execute_tool(
     name: &str,
     args: &str,
@@ -77,9 +152,9 @@ pub async fn execute_tool(
             msg
         }
         "bash" => {
-            let command = args.get("command").and_then(|v| v.as_str()).unwrap_or("");
+            let command = command_arg(&args, "command");
 
-            if let Err(err) = policy.check_command_allowed(command) {
+            if let Err(err) = policy.check_command_allowed(&command) {
                 let msg = err.to_string();
                 let _ = tx.send(AppEvent::ToolOutput(crate::events::ToolOutputEvent {
                     call_id: call_id.to_string(),
@@ -92,7 +167,7 @@ pub async fn execute_tool(
                 return msg;
             }
 
-            if let Err(err) = policy.check_bash_paths(command) {
+            if let Err(err) = policy.check_bash_paths(&command) {
                 let msg = err.to_string();
                 let _ = tx.send(AppEvent::ToolOutput(crate::events::ToolOutputEvent {
                     call_id: call_id.to_string(),
@@ -105,7 +180,7 @@ pub async fn execute_tool(
                 return msg;
             }
 
-            let (result, success) = execute_bash_streaming(command, call_id, tx.clone()).await;
+            let (result, success) = execute_bash_streaming(&command, call_id, tx.clone()).await;
             let _ = tx.send(AppEvent::ToolComplete(crate::events::ToolCompleteEvent {
                 call_id: call_id.to_string(),
                 success,
@@ -130,11 +205,7 @@ pub async fn execute_tool(
                 Err(e) => return fail(format!("Error: cwd: {}", e)),
             };
 
-            let mut command = args
-                .get("command")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
+            let mut command = command_arg(&args, "command");
             if command.trim().is_empty() {
                 let suggestions = crate::verify::detect_suggestions(&cwd);
                 if let Some(s) = suggestions.first() {
@@ -162,14 +233,19 @@ pub async fn execute_tool(
             result
         }
         "rg" => {
-            let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
-            let path = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
+            let query = string_arg(&args, "query");
+            let path = string_arg(&args, "path");
             let context = args
                 .get("context")
                 .and_then(|v| v.as_u64())
                 .map(|v| v as usize);
 
-            let checked_path = match policy.check_path_allowed(Path::new(path)) {
+            let scope = if path.trim().is_empty() {
+                "."
+            } else {
+                path.trim()
+            };
+            let checked_path = match policy.check_path_allowed(Path::new(scope)) {
                 Ok(p) => p,
                 Err(err) => {
                     let msg = err.to_string();
@@ -185,7 +261,7 @@ pub async fn execute_tool(
                 }
             };
 
-            let result = execute_rg(query, checked_path.to_string_lossy().as_ref(), context).await;
+            let result = execute_rg(&query, checked_path.to_string_lossy().as_ref(), context).await;
             let success = !result.starts_with("Error:");
             let _ = tx.send(AppEvent::ToolOutput(crate::events::ToolOutputEvent {
                 call_id: call_id.to_string(),
@@ -198,9 +274,9 @@ pub async fn execute_tool(
             result
         }
         "read_file" => {
-            let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
+            let path = string_arg(&args, "path");
 
-            let checked_path = match policy.check_path_allowed(Path::new(path)) {
+            let checked_path = match policy.check_path_allowed(Path::new(path.trim())) {
                 Ok(p) => p,
                 Err(err) => {
                     let msg = err.to_string();
@@ -232,10 +308,10 @@ pub async fn execute_tool(
             result
         }
         "write_file" => {
-            let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
+            let path = string_arg(&args, "path");
             let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
 
-            let checked_path = match policy.check_path_allowed(Path::new(path)) {
+            let checked_path = match policy.check_path_allowed(Path::new(path.trim())) {
                 Ok(p) => p,
                 Err(err) => {
                     let msg = err.to_string();
@@ -267,7 +343,12 @@ pub async fn execute_tool(
             result
         }
         "list_files" => {
-            let path = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
+            let path = string_arg(&args, "path");
+            let path = if path.trim().is_empty() {
+                "."
+            } else {
+                path.trim()
+            };
 
             let checked_path = match policy.check_path_allowed(Path::new(path)) {
                 Ok(p) => p,
@@ -310,7 +391,7 @@ pub async fn execute_tool(
             result
         }
         "edit_file" => {
-            let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
+            let path = string_arg(&args, "path");
             let old_str = args
                 .get("old_string")
                 .and_then(|v| v.as_str())
@@ -320,7 +401,7 @@ pub async fn execute_tool(
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
 
-            let checked_path = match policy.check_path_allowed(Path::new(path)) {
+            let checked_path = match policy.check_path_allowed(Path::new(path.trim())) {
                 Ok(p) => p,
                 Err(err) => {
                     let msg = err.to_string();
@@ -363,11 +444,11 @@ pub async fn execute_tool(
             result
         }
         "open_at" => {
-            let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
+            let path = string_arg(&args, "path");
             let line = args.get("line").and_then(|v| v.as_u64()).unwrap_or(1) as usize;
             let context = args.get("context").and_then(|v| v.as_u64()).unwrap_or(40) as usize;
 
-            let checked_path = match policy.check_path_allowed(Path::new(path)) {
+            let checked_path = match policy.check_path_allowed(Path::new(path.trim())) {
                 Ok(p) => p,
                 Err(err) => {
                     let msg = err.to_string();
@@ -396,9 +477,9 @@ pub async fn execute_tool(
             result
         }
         "semantic_search" => {
-            let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
+            let query = string_arg(&args, "query");
 
-            let result = execute_semantic_search(query, policy).await;
+            let result = execute_semantic_search(&query, policy).await;
             let success = !result.starts_with("Error");
             let _ = tx.send(AppEvent::ToolOutput(crate::events::ToolOutputEvent {
                 call_id: call_id.to_string(),
@@ -411,8 +492,8 @@ pub async fn execute_tool(
             result
         }
         "smart_search" => {
-            let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
-            let path = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
+            let query = string_arg(&args, "query");
+            let path = string_arg(&args, "path");
             let limit = args
                 .get("limit")
                 .and_then(|v| v.as_u64())
@@ -423,8 +504,13 @@ pub async fn execute_tool(
                 .and_then(|v| v.as_bool())
                 .unwrap_or(true);
 
+            let scope = if path.trim().is_empty() {
+                "."
+            } else {
+                path.trim()
+            };
             let result =
-                execute_smart_search(query, path, limit, use_rg, use_semantic, policy).await;
+                execute_smart_search(&query, scope, limit, use_rg, use_semantic, policy).await;
             let success = !result.starts_with("Error");
             let _ = tx.send(AppEvent::ToolOutput(crate::events::ToolOutputEvent {
                 call_id: call_id.to_string(),
