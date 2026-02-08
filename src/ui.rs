@@ -2,13 +2,16 @@ use ratatui::{
     layout::Margin,
     prelude::*,
     widgets::{
-        Block, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap,
+        Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph, Scrollbar,
+        ScrollbarOrientation, ScrollbarState, Wrap,
     },
 };
 
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::app::{App, IndexingStatus, Pane, Role, ToolOutput, ToolStatus};
+use crate::app::{
+    App, IndexingStatus, Pane, PlanFocus, PlanQuestionKind, Role, ToolOutput, ToolStatus,
+};
 use crate::markdown;
 use crate::theme;
 
@@ -17,21 +20,9 @@ const INDEXING_SPINNER: &[&str] = &["⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "�
 const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const TOOL_SPINNER_FRAMES: &[&str] = &["◐", "◓", "◑", "◒"];
 
-// Styling helpers that work on both dark and light terminal themes.
-fn ghost_style() -> Style {
-    Style::default()
-        .fg(Color::DarkGray)
-        .add_modifier(Modifier::ITALIC)
-        .add_modifier(Modifier::DIM)
-}
-
-fn meta_style() -> Style {
-    Style::default()
-        .fg(Color::DarkGray)
-        .add_modifier(Modifier::DIM)
-}
-
 pub fn ui(frame: &mut Frame, app: &mut App) {
+    let ui_theme = theme::ui_theme(&app.config, Some(app.workspace_root_path()));
+    let pal = ui_theme.palette;
     app.root_area = frame.area();
     let split_ratio = app.split_ratio.max(20).min(80);
 
@@ -53,12 +44,12 @@ pub fn ui(frame: &mut Frame, app: &mut App) {
         ])
         .split(main_chunks[0]);
 
-    let splitter_style = Style::default().fg(Color::DarkGray);
+    let splitter_style = pal.border_style();
     app.splitter_area = main_chunks[1];
     let splitter = Paragraph::new("│".repeat(main_chunks[1].height as usize)).style(splitter_style);
     frame.render_widget(splitter, main_chunks[1]);
 
-    let chat_border_style = Style::default().fg(Color::DarkGray);
+    let chat_border_style = pal.border_style();
 
     let chat_width = left_chunks[0].width.saturating_sub(4) as usize;
 
@@ -76,18 +67,18 @@ pub fn ui(frame: &mut Frame, app: &mut App) {
     let display_messages: Vec<_> = app.display_messages().cloned().collect();
     for msg in display_messages {
         let (prefix, theme) = match msg.role {
-            Role::User => ("▶ ", markdown::Theme::user()),
-            Role::Agent => ("● ", markdown::Theme::agent()),
-            Role::System => ("◆ ", markdown::Theme::agent()),
-            Role::Tool => ("⚙ ", markdown::Theme::agent()),
+            Role::User => ("▶ ", theme::user_markdown_theme(&ui_theme)),
+            Role::Agent => ("● ", ui_theme.markdown),
+            Role::System => ("◆ ", ui_theme.markdown),
+            Role::Tool => ("⚙ ", ui_theme.markdown),
         };
 
         // Add prefix line
         let prefix_style = match msg.role {
             Role::User => Style::default().fg(Color::Cyan).bold(),
-            Role::Agent => Style::default().fg(Color::Rgb(217, 119, 87)).bold(),
-            Role::System => Style::default().fg(Color::Yellow).bold(),
-            Role::Tool => Style::default().fg(Color::Magenta).bold(),
+            Role::Agent => Style::default().fg(pal.accent).bold(),
+            Role::System => Style::default().fg(pal.warn).bold(),
+            Role::Tool => Style::default().fg(pal.accent).bold(),
         };
 
         // Show reasoning as ghost text (if any) - wrap long lines
@@ -101,12 +92,17 @@ pub fn ui(frame: &mut Frame, app: &mut App) {
                 let wrap_width = chat_width.saturating_sub(2);
                 for chunk in chars.chunks(wrap_width) {
                     let text: String = chunk.iter().collect();
-                    all_lines.push(Line::from(Span::styled(text, ghost_style())));
+                    all_lines.push(Line::from(Span::styled(text, pal.ghost())));
                 }
             }
         }
 
-        let md_lines = markdown::render(&msg.content, theme, chat_width.saturating_sub(2));
+        let md_lines = markdown::render(
+            &msg.content,
+            theme,
+            ui_theme.syntax,
+            chat_width.saturating_sub(2),
+        );
 
         // Filter out excessive empty lines
         let mut prev_empty = false;
@@ -151,7 +147,14 @@ pub fn ui(frame: &mut Frame, app: &mut App) {
         // Render it immediately after the assistant message that initiated the tool group.
         if msg.role == Role::Agent {
             if let Some(group_id) = msg.tool_group_id {
-                render_tool_group_inline(&*app, group_id, tool_spinner, chat_width, &mut all_lines);
+                render_tool_group_inline(
+                    &*app,
+                    &ui_theme,
+                    group_id,
+                    tool_spinner,
+                    chat_width,
+                    &mut all_lines,
+                );
             }
         }
     }
@@ -172,7 +175,7 @@ pub fn ui(frame: &mut Frame, app: &mut App) {
                 let wrap_width = chat_width.saturating_sub(2);
                 for chunk in chars.chunks(wrap_width) {
                     let text: String = chunk.iter().collect();
-                    all_lines.push(Line::from(Span::styled(text, ghost_style())));
+                    all_lines.push(Line::from(Span::styled(text, pal.ghost())));
                 }
             }
         }
@@ -195,14 +198,14 @@ pub fn ui(frame: &mut Frame, app: &mut App) {
                 format!("{}ms", elapsed.as_millis())
             };
             all_lines.push(Line::from(vec![
-                Span::styled(format!("{} ", spinner), Style::default().fg(Color::Yellow)),
-                Span::styled(time_str, Style::default().fg(Color::DarkGray)),
+                Span::styled(format!("{} ", spinner), Style::default().fg(pal.warn)),
+                Span::styled(time_str, pal.meta()),
             ]));
         } else if !app.current_response.is_empty() {
             // Show streaming content with spinner
-            let theme = markdown::Theme::agent();
+            let theme = ui_theme.markdown;
             let md_lines =
-                markdown::render(&app.current_response, theme, chat_width.saturating_sub(4));
+                markdown::render(&app.current_response, theme, ui_theme.syntax, chat_width.saturating_sub(4));
 
             if let Some(first) = md_lines.first() {
                 let mut first_spans = vec![Span::styled(
@@ -249,9 +252,17 @@ pub fn ui(frame: &mut Frame, app: &mut App) {
     app.chat_area = left_chunks[0];
 
     let chat_title = if app.active_pane == Pane::Chat {
-        format!("* Lorikeet · {} ", app.model)
+        if app.plan_mode {
+            format!("* Lorikeet · {} · PLAN ", app.model)
+        } else {
+            format!("* Lorikeet · {} ", app.model)
+        }
     } else {
-        format!("  Lorikeet · {} ", app.model)
+        if app.plan_mode {
+            format!("  Lorikeet · {} · PLAN ", app.model)
+        } else {
+            format!("  Lorikeet · {} ", app.model)
+        }
     };
     let messages_widget = Paragraph::new(all_lines)
         .block(
@@ -294,44 +305,91 @@ pub fn ui(frame: &mut Frame, app: &mut App) {
         .wrap(Wrap { trim: false });
     frame.render_widget(input_widget, left_chunks[1]);
 
-    if app.active_pane == Pane::Chat && !app.is_processing && !app.settings_open {
+    if app.active_pane == Pane::Chat
+        && !app.is_processing
+        && !app.settings_open
+        && !app.themes_open
+        && !app.plan_popup_open
+    {
         let cursor_x = left_chunks[1].x + app.cursor_pos as u16 + 1;
         let cursor_y = left_chunks[1].y + 1;
         frame.set_cursor_position((cursor_x, cursor_y));
     }
 
-    // Status bar
-    let mut status_text =
-        " ESC quit │ TAB switch │ CTRL+←/→ resize │ SHIFT+↑↓ scroll │ PgUp/PgDn │ ENTER send"
-            .to_string();
-    if let Some(group_id) = app.last_tool_group_id {
-        let has_trace = app.tool_outputs.iter().any(|t| t.group_id == group_id);
-        if has_trace {
-            status_text.push_str(" │ Ctrl+E trace │ Ctrl+I details");
-        }
-    }
-    if !app.verify_suggestions.is_empty() {
-        let hint = app
-            .verify_suggestions
-            .iter()
-            .take(1)
-            .map(|s| format!("Verify: {}", s.command))
-            .collect::<Vec<_>>()
-            .join(" ");
-        status_text.push_str(" │ ");
-        status_text.push_str(&hint);
-        status_text.push_str(" (/verify)");
-    }
-
-    let status = Paragraph::new(status_text).style(meta_style());
+    // Status bar (minimal; keep other shortcuts discoverable via /help)
+    let status_text = " ESC quit │ TAB plan │ ENTER send";
+    let status = Paragraph::new(status_text).style(pal.meta());
     frame.render_widget(status, left_chunks[2]);
 
     // Context sidebar (right pane)
     app.context_area = main_chunks[2];
-    render_context_sidebar(frame, app, main_chunks[2]);
+    render_context_sidebar(frame, app, main_chunks[2], &ui_theme);
+
+    // Slash command suggestions overlay (while typing)
+    if !app.settings_open && !app.themes_open && !app.plan_popup_open {
+        render_command_suggestions_overlay(frame, app, left_chunks[1], pal);
+    }
     if app.settings_open {
         render_settings_popup(frame, app);
     }
+    if app.themes_open {
+        render_themes_popup(frame, app);
+    }
+    if app.plan_popup_open {
+        render_plan_popup(frame, app, &ui_theme);
+    }
+}
+
+fn render_command_suggestions_overlay(
+    frame: &mut Frame,
+    app: &App,
+    input_area: Rect,
+    pal: theme::UiPalette,
+) {
+    let t = app.input.trim_start();
+    // Show suggestions immediately when the user types '/', not only after a second character.
+    if !t.starts_with('/') {
+        return;
+    }
+    let suggestions = app.command_suggestions(t);
+    if suggestions.is_empty() {
+        return;
+    }
+
+    let max_items = suggestions.len().min(6);
+    let h = (max_items as u16).saturating_add(2);
+    let y = input_area.y.saturating_sub(h);
+    let area = Rect {
+        x: input_area.x,
+        y,
+        width: input_area.width,
+        height: h,
+    };
+
+    frame.render_widget(Clear, area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(pal.border_style())
+        .title(Span::styled(" Commands ", pal.meta()));
+
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let w = inner.width.saturating_sub(2) as usize;
+    let mut lines: Vec<Line> = Vec::new();
+    let selected = app.command_suggest_selected.min(max_items.saturating_sub(1));
+    for (i, (cmd, desc)) in suggestions.into_iter().take(max_items).enumerate() {
+        let s = format!("{:<10} {}", cmd, desc);
+        let style = if i == selected {
+            pal.selection()
+        } else {
+            Style::default().fg(pal.fg)
+        };
+        lines.push(Line::from(Span::styled(truncate_line(&s, w), style)));
+    }
+
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), inner);
 }
 
 /// Render the indexing status bar
@@ -368,73 +426,501 @@ fn render_indexing_status(status: &IndexingStatus, spinner_frame: usize) -> Stri
 }
 
 fn render_settings_popup(frame: &mut Frame, app: &mut App) {
+    let pal = theme::ui_palette(&app.config, Some(app.workspace_root_path()));
     let area = frame.area();
-    let popup_area = centered_rect(70, 70, area);
+    let popup_area = centered_rect(78, 75, area);
 
     frame.render_widget(Clear, popup_area);
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Gray))
-        .title(" Settings ");
+        .border_type(BorderType::Rounded)
+        .border_style(pal.border_style())
+        .title(Span::styled(
+            " Settings ",
+            Style::default().fg(pal.accent).bold(),
+        ));
     let inner = block.inner(popup_area);
     frame.render_widget(block, popup_area);
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Min(5),
+            Constraint::Min(8),
             Constraint::Length(3),
             Constraint::Length(1),
         ])
         .split(inner);
 
+    let top = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Length(18),
+            Constraint::Length(1),
+            Constraint::Min(10),
+        ])
+        .split(chunks[0]);
+
+    // Categories (left)
+    let cat_rows = app.settings_category_rows();
+    let cat_focused = app.settings_focus_is_categories();
+    let cat_width = top[0].width.saturating_sub(2) as usize;
+    let mut cat_lines: Vec<Line> = Vec::new();
+    for (i, label) in cat_rows.iter().enumerate() {
+        let is_selected = i == app.settings_category_selected;
+        let mut style = Style::default().fg(pal.fg);
+        if is_selected && cat_focused {
+            style = pal.selection();
+        } else if is_selected && !cat_focused {
+            style = pal.meta();
+        }
+        let glyph = if is_selected { "▶ " } else { "  " };
+        let s = truncate_line(&format!("{}{}", glyph, label), cat_width);
+        cat_lines.push(Line::from(Span::styled(s, style)));
+    }
+
+    let cats_block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Plain)
+        .border_style(pal.border_style())
+        .title(Span::styled(" Categories ", pal.meta()));
+    frame.render_widget(
+        Paragraph::new(cat_lines)
+            .block(cats_block)
+            .wrap(Wrap { trim: true }),
+        top[0],
+    );
+
+    // Divider
+    frame.render_widget(
+        Paragraph::new("│".repeat(top[1].height as usize)).style(pal.border_style()),
+        top[1],
+    );
+
+    // Items (right)
     let rows = app.settings_rows();
-    let width = chunks[0].width.saturating_sub(2) as usize;
-    let mut lines: Vec<Line> = Vec::new();
+    let item_focused = !cat_focused;
+    let item_width = top[2].width.saturating_sub(2) as usize;
+    let mut item_lines: Vec<Line> = Vec::new();
     for (idx, (label, value)) in rows.iter().enumerate() {
         let is_selected = idx == app.settings_selected;
-        let prefix = if is_selected { "> " } else { "  " };
-        let display = format!("{:<20} {}", label, value);
-        let trimmed = truncate_line(&display, width.saturating_sub(2));
-        let style = if is_selected {
-            Style::default().fg(Color::Black).bg(Color::Gray)
-        } else {
-            Style::default().fg(Color::Reset)
-        };
-        lines.push(Line::from(Span::styled(
-            format!("{}{}", prefix, trimmed),
+        let mut style = Style::default().fg(pal.fg);
+        if is_selected && item_focused {
+            style = pal.selection();
+        } else if is_selected && !item_focused {
+            style = pal.meta();
+        }
+        let display = format!("{:<18} {}", label, value);
+        item_lines.push(Line::from(Span::styled(
+            truncate_line(&display, item_width),
             style,
         )));
     }
 
-    let list = Paragraph::new(lines).wrap(Wrap { trim: true });
-    frame.render_widget(list, chunks[0]);
+    let items_block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Plain)
+        .border_style(pal.border_style())
+        .title(Span::styled(" Settings ", pal.meta()));
+    frame.render_widget(
+        Paragraph::new(item_lines)
+            .block(items_block)
+            .wrap(Wrap { trim: true }),
+        top[2],
+    );
 
+    // Value editor
+    let editor_title = format!(" Value — {} ", app.settings_selected_label());
     let input_block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::DarkGray))
-        .title(" Value ");
+        .border_type(BorderType::Rounded)
+        .border_style(pal.border_style())
+        .title(Span::styled(editor_title, pal.meta()));
     let input = Paragraph::new(app.settings_input.as_str())
         .block(input_block)
-        .wrap(Wrap { trim: false });
+        .wrap(Wrap { trim: false })
+        .style(Style::default().fg(pal.fg));
     frame.render_widget(input, chunks[1]);
 
-    let hints = Paragraph::new(" Enter save │ Esc cancel │ Up/Down navigate │ Tab next ")
-        .style(Style::default().fg(Color::DarkGray));
+    let hints =
+        Paragraph::new(" Enter save • Esc cancel • Tab focus • ↑↓ navigate • ←→ cycle theme")
+            .style(pal.meta());
     frame.render_widget(hints, chunks[2]);
 
-    let cursor_x = chunks[1].x + 1 + app.settings_cursor as u16;
-    let cursor_y = chunks[1].y + 1;
-    frame.set_cursor_position((cursor_x, cursor_y));
+    // Cursor only when editing items.
+    if item_focused {
+        let cursor_x = chunks[1].x + 1 + app.settings_cursor as u16;
+        let cursor_y = chunks[1].y + 1;
+        frame.set_cursor_position((cursor_x, cursor_y));
+    }
+}
+
+fn render_themes_popup(frame: &mut Frame, app: &mut App) {
+    let pal = theme::ui_theme(&app.config, Some(app.workspace_root_path())).palette;
+    let area = frame.area();
+    let popup_area = centered_rect(72, 60, area);
+
+    frame.render_widget(Clear, popup_area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(pal.border_style())
+        .title(Span::styled(
+            " Themes ",
+            Style::default().fg(pal.accent).bold(),
+        ));
+    let inner = block.inner(popup_area);
+    frame.render_widget(block, popup_area);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Min(8),
+            Constraint::Length(1),
+        ])
+        .split(inner);
+
+    let filter_block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Plain)
+        .border_style(pal.border_style())
+        .title(Span::styled(" Filter ", pal.meta()));
+    let filter = Paragraph::new(app.themes_query.as_str())
+        .block(filter_block)
+        .wrap(Wrap { trim: false })
+        .style(Style::default().fg(pal.fg));
+    frame.render_widget(filter, chunks[0]);
+    frame.set_cursor_position((chunks[0].x + 1 + app.themes_cursor as u16, chunks[0].y + 1));
+
+    let items = app.filtered_themes();
+    let content = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(45), Constraint::Length(1), Constraint::Percentage(55)])
+        .split(chunks[1]);
+
+    // Divider
+    frame.render_widget(
+        Paragraph::new("│".repeat(content[1].height as usize)).style(pal.border_style()),
+        content[1],
+    );
+
+    // Theme list (left)
+    let list_w = content[0].width.saturating_sub(2) as usize;
+    let mut lines: Vec<Line> = Vec::new();
+    for (i, name) in items.iter().enumerate() {
+        let is_sel = i == app.themes_selected;
+        let style = if is_sel {
+            pal.selection()
+        } else {
+            Style::default().fg(pal.fg)
+        };
+
+        let tag = theme::builtin_theme_tagline(name).unwrap_or("custom");
+        let s = format!("{:<12} {}", name, tag);
+        lines.push(Line::from(Span::styled(truncate_line(&s, list_w), style)));
+    }
+    let list_block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Plain)
+        .border_style(pal.border_style())
+        .title(Span::styled(" Available ", pal.meta()));
+    frame.render_widget(
+        Paragraph::new(lines).block(list_block).wrap(Wrap { trim: true }),
+        content[0],
+    );
+
+    // Preview (right)
+    let sel_name = items
+        .get(app.themes_selected)
+        .cloned()
+        .unwrap_or_else(|| "system".to_string());
+    let preview_theme = theme::ui_theme_by_name(&sel_name, Some(app.workspace_root_path()));
+
+    let preview_block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Plain)
+        .border_style(pal.border_style())
+        .title(Span::styled(" Preview ", pal.meta()));
+    let preview_inner = preview_block.inner(content[2]);
+    frame.render_widget(preview_block, content[2]);
+
+    const SAMPLE: &str = "# Preview\n\n- headings, lists, links\n- `inline code`\n\n```rs\nfn main() { println!(\"hi\"); }\n```";
+    let w = preview_inner.width.saturating_sub(2) as usize;
+    let mut preview_lines = markdown::render(SAMPLE, preview_theme.markdown, preview_theme.syntax, w);
+
+    // Add a tool trace sample beneath the markdown preview.
+    preview_lines.push(Line::from(""));
+    preview_lines.push(Line::from(Span::styled(
+        "Tool Trace",
+        Style::default().fg(preview_theme.tool_trace.title).bold(),
+    )));
+    preview_lines.push(Line::from(vec![
+        Span::styled("● ", Style::default().fg(preview_theme.palette.ok)),
+        Span::styled(
+            "bash ",
+            Style::default().fg(preview_theme.tool_trace.invocation).bold(),
+        ),
+        Span::styled(
+            "rg -n \"SandboxPolicy\" src",
+            Style::default().fg(preview_theme.tool_trace.invocation),
+        ),
+        Span::styled(
+            " [id=call_123] (cwd=repo) (12ms)",
+            Style::default()
+                .fg(preview_theme.tool_trace.call_id)
+                .add_modifier(Modifier::DIM),
+        ),
+    ]));
+    preview_lines.push(Line::from(vec![
+        Span::styled(
+            "└ sandbox: ",
+            Style::default().fg(preview_theme.tool_trace.details_key),
+        ),
+        Span::styled(
+            "allow",
+            Style::default().fg(preview_theme.tool_trace.sandbox_allow),
+        ),
+    ]));
+
+    frame.render_widget(
+        Paragraph::new(preview_lines).wrap(Wrap { trim: true }),
+        preview_inner,
+    );
+
+    let hints =
+        Paragraph::new(" Enter apply • Esc close • ↑↓ select • type to filter")
+            .style(pal.meta());
+    frame.render_widget(hints, chunks[2]);
+}
+
+fn render_plan_popup(frame: &mut Frame, app: &mut App, ui_theme: &theme::UiTheme) {
+    let pal = ui_theme.palette;
+    let area = frame.area();
+    let popup_w = area.width.saturating_mul(85) / 100;
+    let popup_h = area.height.saturating_mul(80) / 100;
+    let popup_area = Rect {
+        x: area.x + (area.width.saturating_sub(popup_w) / 2),
+        y: area.y + (area.height.saturating_sub(popup_h) / 2),
+        width: popup_w.max(40),
+        height: popup_h.max(16),
+    };
+
+    frame.render_widget(Clear, popup_area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(pal.border_style())
+        .title(" Plan ");
+    frame.render_widget(block, popup_area);
+
+    let inner = popup_area.inner(Margin {
+        vertical: 1,
+        horizontal: 1,
+    });
+
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(2), // header / error
+            Constraint::Min(1),    // main
+            Constraint::Length(3), // buttons + hints
+        ])
+        .split(inner);
+
+    // Header (parse error if any)
+    let mut header_spans = vec![Span::styled(
+        "Plan review",
+        Style::default().fg(pal.accent).bold(),
+    )];
+    if let Some(err) = &app.plan_parse_error {
+        header_spans.push(Span::raw("  "));
+        header_spans.push(Span::styled(
+            format!("parse error: {err}"),
+            Style::default().fg(pal.err),
+        ));
+    }
+    frame.render_widget(Paragraph::new(Line::from(header_spans)), rows[0]);
+
+    let cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(32), Constraint::Percentage(68)])
+        .split(rows[1]);
+
+    // Questions list
+    let questions = app
+        .plan_draft
+        .as_ref()
+        .map(|d| d.questions.clone())
+        .unwrap_or_default();
+    let q_items: Vec<ListItem> = if questions.is_empty() {
+        vec![ListItem::new(Line::from(Span::styled(
+            "(no questions)",
+            pal.meta(),
+        )))]
+    } else {
+        questions
+            .iter()
+            .enumerate()
+            .map(|(_i, q)| {
+                let mut line = format!("{}", q.prompt);
+                if let Some(ans) = app
+                    .plan_draft
+                    .as_ref()
+                    .and_then(|d| d.answers.get(&q.id))
+                    .or_else(|| q.default.as_ref())
+                {
+                    if !ans.trim().is_empty() {
+                        line.push_str(&format!("  ({})", ans));
+                    }
+                }
+                ListItem::new(Line::from(line))
+            })
+            .collect()
+    };
+
+    let mut q_state = ListState::default();
+    if !q_items.is_empty() && !questions.is_empty() {
+        q_state.select(Some(app.plan_question_selected.min(q_items.len().saturating_sub(1))));
+    }
+
+    let q_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(if matches!(app.plan_focus, PlanFocus::Questions) {
+            pal.selection()
+        } else {
+            pal.border_style()
+        })
+        .title(" Questions ");
+    let q_list = List::new(q_items)
+        .block(q_block)
+        .highlight_style(pal.selection())
+        .highlight_symbol("› ");
+    frame.render_stateful_widget(q_list, cols[0], &mut q_state);
+
+    // Right side: answer + plan preview
+    let right_rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(5), Constraint::Min(1)])
+        .split(cols[1]);
+
+    let answer_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(if matches!(app.plan_focus, PlanFocus::Answer) {
+            pal.selection()
+        } else {
+            pal.border_style()
+        })
+        .title(" Answer ");
+
+    let kind = app.plan_selected_question_kind();
+    let answer_text = match kind {
+        Some(PlanQuestionKind::Select) => {
+            let opts = app
+                .plan_draft
+                .as_ref()
+                .and_then(|d| d.questions.get(app.plan_question_selected))
+                .map(|q| q.options.clone())
+                .unwrap_or_default();
+            if opts.is_empty() {
+                format!("{}\n\n(no options)", app.plan_answer_input)
+            } else {
+                let mut out = String::new();
+                out.push_str(&format!("{}\n", app.plan_answer_input));
+                out.push_str("\nOptions: ");
+                for (i, o) in opts.iter().enumerate() {
+                    if i > 0 {
+                        out.push_str(" · ");
+                    }
+                    out.push_str(o);
+                }
+                out
+            }
+        }
+        _ => app.plan_answer_input.clone(),
+    };
+    frame.render_widget(
+        Paragraph::new(answer_text)
+            .block(answer_block)
+            .wrap(Wrap { trim: false }),
+        right_rows[0],
+    );
+
+    // Cursor in answer field (only for text questions)
+    if matches!(app.plan_focus, PlanFocus::Answer) && kind == Some(PlanQuestionKind::Text) {
+        let x0 = right_rows[0].x + 1;
+        let y0 = right_rows[0].y + 1;
+        let max_x = right_rows[0].right().saturating_sub(2);
+        let cursor_x = (x0 + app.plan_answer_cursor as u16).min(max_x);
+        frame.set_cursor_position((cursor_x, y0));
+    }
+
+    let plan_block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(pal.border_style())
+        .title(" Plan ");
+
+    let plan_text = app
+        .plan_draft
+        .as_ref()
+        .map(|d| d.plan_markdown.clone())
+        .unwrap_or_else(|| "(no plan)".into());
+    let w = right_rows[1].width.saturating_sub(4) as usize;
+    let md_lines = markdown::render(&plan_text, ui_theme.markdown, ui_theme.syntax, w.max(10));
+    let plan_para = Paragraph::new(md_lines)
+        .block(plan_block)
+        .scroll((app.plan_preview_scroll as u16, 0));
+    frame.render_widget(plan_para, right_rows[1]);
+
+    // Buttons
+    let buttons_area = rows[2];
+    let buttons_inner = buttons_area.inner(Margin {
+        vertical: 0,
+        horizontal: 1,
+    });
+
+    let btn_cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Length(12), Constraint::Length(12), Constraint::Min(1)])
+        .split(buttons_inner);
+
+    let exec_style = if matches!(app.plan_focus, PlanFocus::Buttons) && app.plan_button_selected == 0
+    {
+        pal.selection()
+    } else {
+        Style::default().fg(pal.accent)
+    };
+    let cancel_style =
+        if matches!(app.plan_focus, PlanFocus::Buttons) && app.plan_button_selected == 1 {
+            pal.selection()
+        } else {
+            Style::default().fg(pal.warn)
+        };
+
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(" Execute ", exec_style)))
+            .block(Block::default().borders(Borders::ALL).border_style(pal.border_style())),
+        btn_cols[0],
+    );
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(" Cancel ", cancel_style)))
+            .block(Block::default().borders(Borders::ALL).border_style(pal.border_style())),
+        btn_cols[1],
+    );
+
+    let hint = "Tab focus · ↑↓ navigate · Enter select · Esc close";
+    frame.render_widget(Paragraph::new(hint).style(pal.meta()), btn_cols[2]);
 }
 
 fn render_tool_group_inline(
     app: &App,
+    ui_theme: &theme::UiTheme,
     group_id: u64,
     tool_spinner: &str,
     chat_width: usize,
     out: &mut Vec<Line<'static>>,
 ) {
+    let pal = ui_theme.palette;
     let tools: Vec<&ToolOutput> = app
         .tool_outputs
         .iter()
@@ -467,21 +953,18 @@ fn render_tool_group_inline(
         Span::raw("  "),
         Span::styled(
             format!("{} Tool Trace ({}) ", disclosure, tools.len()),
-            Style::default().fg(Color::Reset).bold(),
+            Style::default().fg(ui_theme.tool_trace.title).bold(),
         ),
         Span::styled(
             status,
-            Style::default().fg(if any_running {
-                Color::Yellow
-            } else {
-                Color::Green
-            }),
+            Style::default().fg(if any_running { pal.warn } else { pal.ok }),
         ),
     ]));
 
     for t in tools {
         render_tool_trace_item(
             app,
+            ui_theme,
             t,
             expanded,
             show_details,
@@ -496,6 +979,7 @@ fn render_tool_group_inline(
 
 fn render_tool_trace_item(
     app: &App,
+    ui_theme: &theme::UiTheme,
     tool: &ToolOutput,
     group_expanded: bool,
     show_details: bool,
@@ -503,10 +987,11 @@ fn render_tool_trace_item(
     chat_width: usize,
     out: &mut Vec<Line<'static>>,
 ) {
+    let pal = ui_theme.palette;
     let (status_indicator, status_color) = match tool.status {
-        ToolStatus::Running => (tool_spinner, Color::Yellow),
-        ToolStatus::Success => ("●", Color::Green),
-        ToolStatus::Error => ("●", Color::Red),
+        ToolStatus::Running => (tool_spinner, pal.warn),
+        ToolStatus::Success => ("●", pal.ok),
+        ToolStatus::Error => ("●", pal.err),
     };
 
     let elapsed = tool.elapsed();
@@ -545,20 +1030,20 @@ fn render_tool_trace_item(
             format!("{} ", tool.tool),
             Style::default()
                 .fg(match tool.status {
-                    ToolStatus::Running => Color::Yellow,
-                    ToolStatus::Success => Color::Reset,
-                    ToolStatus::Error => Color::Red,
+                    ToolStatus::Running => pal.warn,
+                    ToolStatus::Success => ui_theme.tool_trace.invocation,
+                    ToolStatus::Error => pal.err,
                 })
                 .bold(),
         ),
-        Span::styled(args, Style::default().fg(Color::Reset)),
-        Span::styled(suffix, meta_style()),
+        Span::styled(args, Style::default().fg(ui_theme.tool_trace.invocation)),
+        Span::styled(suffix, Style::default().fg(ui_theme.tool_trace.call_id).add_modifier(Modifier::DIM)),
     ]));
 
     let want_details = (group_expanded && show_details) || tool.status == ToolStatus::Error;
     if want_details {
         let (label, style) = if tool.sandbox.allowed {
-            ("allow".to_string(), Style::default().fg(Color::Green))
+            ("allow".to_string(), Style::default().fg(ui_theme.tool_trace.sandbox_allow))
         } else {
             (
                 format!(
@@ -572,12 +1057,12 @@ fn render_tool_trace_item(
                         ))
                         .unwrap_or_default()
                 ),
-                Style::default().fg(Color::Red),
+                Style::default().fg(ui_theme.tool_trace.sandbox_deny),
             )
         };
 
         out.push(Line::from(vec![
-            Span::raw("  └ sandbox: "),
+            Span::styled("  └ sandbox: ", Style::default().fg(ui_theme.tool_trace.details_key)),
             Span::styled(label, style),
         ]));
 
@@ -585,15 +1070,15 @@ fn render_tool_trace_item(
         const MAX_INPUT_LINES: usize = 8;
         if !tool.args_pretty_lines.is_empty() {
             out.push(Line::from(vec![
-                Span::raw("  └ input: "),
-                Span::styled("{", meta_style()),
+                Span::styled("  └ input: ", Style::default().fg(ui_theme.tool_trace.details_key)),
+                Span::styled("{", Style::default().fg(ui_theme.tool_trace.details_value).add_modifier(Modifier::DIM)),
             ]));
             for l in tool.args_pretty_lines.iter().take(MAX_INPUT_LINES) {
                 out.push(Line::from(vec![
                     Span::raw("    "),
                     Span::styled(
                         truncate_to_width(l, chat_width.saturating_sub(4)),
-                        meta_style(),
+                        Style::default().fg(ui_theme.tool_trace.details_value).add_modifier(Modifier::DIM),
                     ),
                 ]));
             }
@@ -605,7 +1090,7 @@ fn render_tool_trace_item(
                             "… {} more lines",
                             tool.args_pretty_lines.len() - MAX_INPUT_LINES
                         ),
-                        meta_style(),
+                        Style::default().fg(ui_theme.tool_trace.details_value).add_modifier(Modifier::DIM),
                     ),
                 ]));
             }
@@ -628,7 +1113,7 @@ fn render_tool_trace_item(
                                 "… {}",
                                 truncate_to_width(last, chat_width.saturating_sub(6))
                             ),
-                            meta_style(),
+                            Style::default().fg(ui_theme.tool_trace.out_prefix).add_modifier(Modifier::DIM),
                         ),
                     ]));
                 }
@@ -667,20 +1152,22 @@ fn render_tool_trace_item(
         let mut spans: Vec<Span<'static>> = Vec::new();
         spans.push(Span::styled(
             prefix,
-            Style::default().fg(Color::Rgb(120, 120, 120)),
+            Style::default()
+                .fg(ui_theme.tool_trace.out_prefix)
+                .add_modifier(Modifier::DIM),
         ));
 
         let text = truncate_to_width(l, chat_width.saturating_sub(prefix.len()));
         if tool.tool == "list_files" {
-            let style = theme::style_for_filename(&text, &app.config);
+            let style = theme::style_for_filename_with_theme(&text, &app.config, ui_theme);
             spans.push(Span::styled(text, style));
         } else if tool.tool == "read_file" {
-            spans.extend(highlight_line_for_ext(&text, ext));
+            spans.extend(highlight_line_for_ext(&text, ext, ui_theme));
         } else {
             let base_style = if tool.status == ToolStatus::Error {
-                Style::default().fg(Color::Red)
+                Style::default().fg(pal.err)
             } else {
-                Style::default().fg(Color::Rgb(200, 200, 200))
+                Style::default().fg(ui_theme.tool_trace.out_text)
             };
             spans.push(Span::styled(text, base_style));
         }
@@ -691,12 +1178,18 @@ fn render_tool_trace_item(
     if remaining > 0 || tool.output_is_truncated() {
         out.push(Line::from(vec![
             Span::raw("        "),
-            Span::styled(format!("… {} more lines", remaining), meta_style()),
+            Span::styled(
+                format!("… {} more lines", remaining),
+                Style::default()
+                    .fg(ui_theme.tool_trace.out_prefix)
+                    .add_modifier(Modifier::DIM),
+            ),
         ]));
     }
 }
 
-fn render_context_sidebar(frame: &mut Frame, app: &mut App, area: Rect) {
+fn render_context_sidebar(frame: &mut Frame, app: &mut App, area: Rect, ui_theme: &theme::UiTheme) {
+    let pal = ui_theme.palette;
     let title = if app.active_pane == Pane::Context {
         " * Context "
     } else {
@@ -705,7 +1198,7 @@ fn render_context_sidebar(frame: &mut Frame, app: &mut App, area: Rect) {
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::DarkGray))
+        .border_style(pal.border_style())
         .title(title)
         .title_bottom(render_indexing_status(
             &app.indexing_status,
@@ -718,15 +1211,19 @@ fn render_context_sidebar(frame: &mut Frame, app: &mut App, area: Rect) {
     let mut lines: Vec<Line> = Vec::new();
 
     lines.push(Line::from(vec![
-        Span::styled("Workspace: ", meta_style()),
+        Span::styled("Workspace: ", pal.meta()),
         Span::raw(truncate_to_width(
             &app.workspace_root_display(),
             width.saturating_sub(11),
         )),
     ]));
     lines.push(Line::from(vec![
-        Span::styled("Model: ", meta_style()),
+        Span::styled("Model: ", pal.meta()),
         Span::raw(truncate_to_width(&app.model, width.saturating_sub(7))),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("Mode: ", pal.meta()),
+        Span::raw(if app.plan_mode { "plan" } else { "auto" }),
     ]));
 
     let sandbox_enabled = app
@@ -736,20 +1233,40 @@ fn render_context_sidebar(frame: &mut Frame, app: &mut App, area: Rect) {
         .and_then(|s| s.enabled)
         .unwrap_or(true);
     lines.push(Line::from(vec![
-        Span::styled("Sandbox: ", meta_style()),
+        Span::styled("Sandbox: ", pal.meta()),
         Span::raw(if sandbox_enabled { "on" } else { "off" }),
     ]));
 
     if !app.verify_suggestions.is_empty() {
         lines.push(Line::from(""));
         lines.push(Line::from(vec![
-            Span::styled("Verify: ", meta_style()),
+            Span::styled("Verify: ", pal.meta()),
             Span::raw(truncate_to_width(
                 &app.verify_suggestions[0].command,
                 width.saturating_sub(8),
             )),
         ]));
-        lines.push(Line::from(Span::styled("Run: /verify", meta_style())));
+        lines.push(Line::from(Span::styled("Run: /verify", pal.meta())));
+    }
+
+    if let Some(cp) = &app.last_checkpoint {
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![
+            Span::styled("Last checkpoint: ", pal.meta()),
+            Span::raw(truncate_to_width(&cp.id, width.saturating_sub(17))),
+        ]));
+        if let Some(name) = &cp.name {
+            if !name.trim().is_empty() {
+                lines.push(Line::from(vec![
+                    Span::styled("Name: ", pal.meta()),
+                    Span::raw(truncate_to_width(name, width.saturating_sub(6))),
+                ]));
+            }
+        }
+        lines.push(Line::from(vec![
+            Span::styled("Backend: ", pal.meta()),
+            Span::raw(format!("{:?}", cp.backend).to_lowercase()),
+        ]));
     }
 
     lines.push(Line::from(""));
@@ -758,7 +1275,7 @@ fn render_context_sidebar(frame: &mut Frame, app: &mut App, area: Rect) {
         Style::default().fg(Color::Reset).bold(),
     )));
     if app.recent_files.is_empty() {
-        lines.push(Line::from(Span::styled("(none yet)", meta_style())));
+        lines.push(Line::from(Span::styled("(none yet)", pal.meta())));
     } else {
         for p in app.recent_files.iter().take(10) {
             lines.push(Line::from(vec![
@@ -816,29 +1333,33 @@ fn truncate_line(line: &str, width: usize) -> String {
     out
 }
 
-fn highlight_line_for_ext(line: &str, ext: Option<&str>) -> Vec<Span<'static>> {
+fn highlight_line_for_ext(line: &str, ext: Option<&str>, ui_theme: &theme::UiTheme) -> Vec<Span<'static>> {
     match ext {
-        Some("md") | Some("mdx") => highlight_markdown_line(line),
-        _ => highlight_code_line(line, ext),
+        Some("md") | Some("mdx") => highlight_markdown_line(line, ui_theme),
+        _ => highlight_code_line(line, ext, ui_theme),
     }
 }
 
-fn highlight_markdown_line(line: &str) -> Vec<Span<'static>> {
+fn highlight_markdown_line(line: &str, ui_theme: &theme::UiTheme) -> Vec<Span<'static>> {
+    let md = ui_theme.markdown;
     let trimmed = line.trim_start();
     if trimmed.starts_with("```") {
         return vec![Span::styled(
             line.to_string(),
-            Style::default().fg(Color::Magenta),
+            Style::default().fg(ui_theme.syntax.keyword),
         )];
     }
     if trimmed.starts_with('#') {
         return vec![Span::styled(
             line.to_string(),
-            Style::default().fg(Color::Cyan).bold(),
+            Style::default().fg(md.heading).bold(),
         )];
     }
     if trimmed.starts_with('>') {
-        return vec![Span::styled(line.to_string(), meta_style())];
+        return vec![Span::styled(
+            line.to_string(),
+            Style::default().fg(md.blockquote).add_modifier(Modifier::DIM | Modifier::ITALIC),
+        )];
     }
 
     let mut spans = Vec::new();
@@ -848,9 +1369,9 @@ fn highlight_markdown_line(line: &str) -> Vec<Span<'static>> {
         if ch == '`' {
             if !buf.is_empty() {
                 let style = if in_code {
-                    Style::default().fg(Color::Yellow)
+                    Style::default().fg(md.code)
                 } else {
-                    Style::default().fg(Color::Rgb(170, 170, 170))
+                    Style::default().fg(md.text)
                 };
                 spans.push(Span::styled(buf.clone(), style));
                 buf.clear();
@@ -858,7 +1379,7 @@ fn highlight_markdown_line(line: &str) -> Vec<Span<'static>> {
             in_code = !in_code;
             spans.push(Span::styled(
                 "`".to_string(),
-                Style::default().fg(Color::Yellow),
+                Style::default().fg(md.code),
             ));
             continue;
         }
@@ -866,16 +1387,17 @@ fn highlight_markdown_line(line: &str) -> Vec<Span<'static>> {
     }
     if !buf.is_empty() {
         let style = if in_code {
-            Style::default().fg(Color::Yellow)
+            Style::default().fg(md.code)
         } else {
-            Style::default().fg(Color::Rgb(170, 170, 170))
+            Style::default().fg(md.text)
         };
         spans.push(Span::styled(buf, style));
     }
     spans
 }
 
-fn highlight_code_line(line: &str, ext: Option<&str>) -> Vec<Span<'static>> {
+fn highlight_code_line(line: &str, ext: Option<&str>, ui_theme: &theme::UiTheme) -> Vec<Span<'static>> {
+    let syn = ui_theme.syntax;
     let mut spans = Vec::new();
     let mut buf = String::new();
     let mut i = 0;
@@ -901,14 +1423,14 @@ fn highlight_code_line(line: &str, ext: Option<&str>) -> Vec<Span<'static>> {
             if !buf.is_empty() {
                 spans.push(Span::styled(
                     buf.clone(),
-                    Style::default().fg(Color::Rgb(170, 170, 170)),
+                    Style::default().fg(syn.ident),
                 ));
                 buf.clear();
             }
             let rest: String = chars[i..].iter().collect();
             spans.push(Span::styled(
                 rest,
-                Style::default().fg(Color::Rgb(160, 160, 160)),
+                Style::default().fg(syn.comment),
             ));
             return spans;
         }
@@ -916,14 +1438,14 @@ fn highlight_code_line(line: &str, ext: Option<&str>) -> Vec<Span<'static>> {
             if !buf.is_empty() {
                 spans.push(Span::styled(
                     buf.clone(),
-                    Style::default().fg(Color::Rgb(170, 170, 170)),
+                    Style::default().fg(syn.ident),
                 ));
                 buf.clear();
             }
             let rest: String = chars[i..].iter().collect();
             spans.push(Span::styled(
                 rest,
-                Style::default().fg(Color::Rgb(160, 160, 160)),
+                Style::default().fg(syn.comment),
             ));
             return spans;
         }
@@ -933,7 +1455,7 @@ fn highlight_code_line(line: &str, ext: Option<&str>) -> Vec<Span<'static>> {
             if !buf.is_empty() {
                 spans.push(Span::styled(
                     buf.clone(),
-                    Style::default().fg(Color::Rgb(170, 170, 170)),
+                    Style::default().fg(syn.ident),
                 ));
                 buf.clear();
             }
@@ -953,7 +1475,7 @@ fn highlight_code_line(line: &str, ext: Option<&str>) -> Vec<Span<'static>> {
             let segment: String = chars[i..j.min(chars.len())].iter().collect();
             spans.push(Span::styled(
                 segment,
-                Style::default().fg(Color::Rgb(134, 239, 172)),
+                Style::default().fg(syn.string),
             ));
             i = j;
             continue;
@@ -966,7 +1488,7 @@ fn highlight_code_line(line: &str, ext: Option<&str>) -> Vec<Span<'static>> {
     if !buf.is_empty() {
         spans.push(Span::styled(
             buf,
-            Style::default().fg(Color::Rgb(170, 170, 170)),
+            Style::default().fg(syn.ident),
         ));
     }
 

@@ -136,10 +136,10 @@ impl SandboxPolicy {
         if executable.is_empty() {
             return Err(SandboxError::CommandNotAllowed(cmd.to_string()));
         }
-        if self.allow_commands.contains(executable) {
+        if self.allow_commands.contains(&executable) {
             Ok(())
         } else {
-            Err(SandboxError::CommandNotAllowed(executable.to_string()))
+            Err(SandboxError::CommandNotAllowed(executable))
         }
     }
 
@@ -168,7 +168,20 @@ impl SandboxPolicy {
 
 fn default_allow_commands() -> Vec<String> {
     vec![
-        "rg", "ls", "cat", "pwd", "sed", "awk", "find", "wc", "head", "tail", "git",
+        "rg",
+        "ls",
+        "cat",
+        "pwd",
+        "sed",
+        "awk",
+        "find",
+        "wc",
+        "head",
+        "tail",
+        "git",
+        // LSP servers (policy-only; can be disabled via config allow_commands)
+        "rust-analyzer",
+        "typescript-language-server",
     ]
     .into_iter()
     .map(|s| s.to_string())
@@ -206,20 +219,35 @@ fn looks_like_path(token: &str) -> bool {
         || token.contains('/')
 }
 
-fn extract_executable(command: &str) -> &str {
+fn extract_executable(command: &str) -> String {
     let trimmed = command.trim();
     if trimmed.is_empty() {
-        return "";
+        return String::new();
     }
     // Split on whitespace; accept simple commands and pipelines.
     let mut parts = trimmed.split_whitespace();
     let first = parts.next().unwrap_or("");
     // If command starts with env VAR= or `command` with leading `env`, try next token.
     if first.contains('=') && parts.clone().next().is_some() {
-        return parts.next().unwrap_or("");
+        return normalize_exe_token(parts.next().unwrap_or(""));
     }
     if first == "env" {
-        return parts.next().unwrap_or("");
+        return normalize_exe_token(parts.next().unwrap_or(""));
     }
-    first
+    normalize_exe_token(first)
+}
+
+fn normalize_exe_token(token: &str) -> String {
+    let t = token.trim().trim_matches('"').trim_matches('\'');
+    if t.is_empty() {
+        return String::new();
+    }
+    // If it's a path (`/usr/bin/rg` or `./node_modules/.bin/foo`), compare by basename so
+    // allowlists can stay stable across machines.
+    if t.contains('/') {
+        if let Some(name) = Path::new(t).file_name().and_then(|s| s.to_str()) {
+            return name.to_string();
+        }
+    }
+    t.to_string()
 }

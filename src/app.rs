@@ -8,6 +8,7 @@ use ratatui::prelude::Rect;
 use tokio::sync::mpsc;
 
 use crate::config::AppConfig;
+use crate::checkpoints;
 use crate::events::AppEvent;
 use crate::llm::{call_llm, ChatMessage};
 use crate::memory::MemoryManager;
@@ -25,6 +26,8 @@ pub struct Message {
     pub reasoning: Option<String>,
     pub tool_calls: Option<Vec<ToolCallMessage>>,
     pub tool_group_id: Option<u64>,
+    // Local UI/system messages that should not be sent to the LLM context.
+    pub local: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -236,6 +239,7 @@ impl ToolOutput {
             "bash" => "$",
             "rg" => "⌕",
             "smart_search" => "≈",
+            "lsp" => "λ",
             "read_file" => "▶",
             "write_file" => "◀",
             "list_files" => "◇",
@@ -257,6 +261,8 @@ impl ToolOutput {
             (&"rg", _) => "Searched",
             (&"smart_search", ToolStatus::Running) => "Searching",
             (&"smart_search", _) => "Searched",
+            (&"lsp", ToolStatus::Running) => "Querying",
+            (&"lsp", _) => "Queried",
             (&"read_file", ToolStatus::Running) => "Reading",
             (&"read_file", _) => "Read",
             (&"write_file", ToolStatus::Running) => "Writing",
@@ -298,6 +304,7 @@ Tools:
 - bash: Run any shell command. Use for reading files (cat), listing dirs (ls), git, builds, tests, etc.
 - rg: Fast exact text search across files. Use for symbols, strings, or precise matches.
 - smart_search: Combined search (rg + semantic). Use when you don't know exact identifiers; returns ranked hits.
+- lsp: Code-aware navigation/refactors via Language Server Protocol. Actions: definition, references, rename, diagnostics.
 - read_file: Read file contents directly.
 - write_file: Write content to a file directly.
 - list_files: List directory contents directly.
@@ -345,6 +352,7 @@ pub struct App {
     pub current_reasoning: String,
     pub spinner_frame: usize,
     pub tool_spinner_frame: usize,
+    pub command_suggest_selected: usize,
     event_tx: mpsc::UnboundedSender<AppEvent>,
     api_key: String,
     pub model: String,
@@ -361,10 +369,18 @@ pub struct App {
     dragging_splitter: bool,
     // Settings UI
     pub settings_open: bool,
+    pub settings_category_selected: usize,
     pub settings_selected: usize,
     pub settings_input: String,
     pub settings_cursor: usize,
+    settings_focus: SettingsFocus,
+    settings_original: AppConfig,
     settings_draft: AppConfig,
+    // Theme picker UI
+    pub themes_open: bool,
+    pub themes_query: String,
+    pub themes_selected: usize,
+    pub themes_cursor: usize,
     // Turn tracking (for memory extraction)
     turn_user_message: Option<String>,
     turn_tool_start_idx: usize,
@@ -391,6 +407,22 @@ pub struct App {
     // Context sidebar
     pub recent_files: VecDeque<String>,
     pub last_searches: VecDeque<String>,
+    pub last_checkpoint: Option<checkpoints::CheckpointMeta>,
+
+    // Plan mode: tools gated unless explicitly executed (/go).
+    pub plan_mode: bool,
+    tools_override_next: bool,
+    ephemeral_user_message: Option<String>,
+    pub plan_generating: bool,
+    pub plan_popup_open: bool,
+    pub plan_parse_error: Option<String>,
+    pub plan_draft: Option<PlanDraft>,
+    pub plan_focus: PlanFocus,
+    pub plan_question_selected: usize,
+    pub plan_answer_input: String,
+    pub plan_answer_cursor: usize,
+    pub plan_preview_scroll: usize,
+    pub plan_button_selected: usize, // 0 execute, 1 cancel
 
     // Indexing status
     pub indexing_status: IndexingStatus,
@@ -423,6 +455,7 @@ impl App {
             .and_then(|g| g.model.clone())
             .unwrap_or_else(|| crate::llm::MODEL.to_string());
         let settings_draft = config.clone();
+        let settings_original = config.clone();
         Self {
             input: String::new(),
             cursor_pos: 0,
@@ -433,6 +466,7 @@ impl App {
                     reasoning: None,
                     tool_calls: None,
                     tool_group_id: None,
+                    local: false,
                 },
                 Message {
                     role: Role::Agent,
@@ -440,6 +474,7 @@ impl App {
                     reasoning: None,
                     tool_calls: None,
                     tool_group_id: None,
+                    local: false,
                 },
             ],
             messages_scroll: 0,
@@ -453,6 +488,7 @@ impl App {
             current_reasoning: String::new(),
             spinner_frame: 0,
             tool_spinner_frame: 0,
+            command_suggest_selected: 0,
             event_tx,
             api_key,
             model,
@@ -467,10 +503,17 @@ impl App {
             split_ratio,
             dragging_splitter: false,
             settings_open: false,
+            settings_category_selected: 0,
             settings_selected: 0,
             settings_input: String::new(),
             settings_cursor: 0,
+            settings_focus: SettingsFocus::Items,
+            settings_original,
             settings_draft,
+            themes_open: false,
+            themes_query: String::new(),
+            themes_selected: 0,
+            themes_cursor: 0,
             turn_user_message: None,
             turn_tool_start_idx: 0,
             current_turn_id: 0,
@@ -484,6 +527,20 @@ impl App {
             tool_loop_abort: None,
             recent_files: VecDeque::new(),
             last_searches: VecDeque::new(),
+            last_checkpoint: None,
+            plan_mode: false,
+            tools_override_next: false,
+            ephemeral_user_message: None,
+            plan_generating: false,
+            plan_popup_open: false,
+            plan_parse_error: None,
+            plan_draft: None,
+            plan_focus: PlanFocus::Questions,
+            plan_question_selected: 0,
+            plan_answer_input: String::new(),
+            plan_answer_cursor: 0,
+            plan_preview_scroll: 0,
+            plan_button_selected: 0,
             indexing_status: load_existing_index_status(),
             indexing_spinner_frame: 0,
             verify_suggestions: Vec::new(),
@@ -582,12 +639,15 @@ impl App {
                                 reasoning: None,
                                 tool_calls: None,
                                 tool_group_id: None,
+                                local: false,
                             },
                         );
                     }
 
                     self.session = Some(store);
                     self.refresh_verify_suggestions();
+                    self.last_checkpoint =
+                        checkpoints::list_checkpoints(&self.workspace_root, 1).ok().and_then(|v| v.into_iter().next());
                     // User-visible notice.
                     self.messages.push(Message {
                         role: Role::Agent,
@@ -595,6 +655,7 @@ impl App {
                         reasoning: None,
                         tool_calls: None,
                         tool_group_id: None,
+                        local: true,
                     });
                     return;
                 }
@@ -612,6 +673,8 @@ impl App {
         }
 
         self.refresh_verify_suggestions();
+        self.last_checkpoint =
+            checkpoints::list_checkpoints(&self.workspace_root, 1).ok().and_then(|v| v.into_iter().next());
 
         // Persist the current system/hello messages.
         if let Some(store) = &self.session {
@@ -678,6 +741,84 @@ impl App {
             return;
         }
 
+        let user_msg = self.input.clone();
+        let user_trimmed = user_msg.trim().to_string();
+
+        // Slash commands are always handled locally (never sent to the model).
+        if user_trimmed.starts_with('/') {
+            self.input.clear();
+            self.cursor_pos = 0;
+
+            // First, try exact command.
+            if self.maybe_handle_command(&user_trimmed) {
+                self.messages.push(Message {
+                    role: Role::User,
+                    content: user_trimmed.clone(),
+                    reasoning: None,
+                    tool_calls: None,
+                    tool_group_id: None,
+                    local: true,
+                });
+                if let Some(last) = self.messages.last() {
+                    self.session_record_message(last);
+                }
+                self.scroll_messages_to_bottom();
+                self.command_suggest_selected = 0;
+                return;
+            }
+
+            // Otherwise, treat it as a prefix and run the currently selected suggestion.
+            let suggestions = self.command_suggestions(&user_trimmed);
+            if !suggestions.is_empty() {
+                let idx = self.command_suggest_selected.min(suggestions.len().saturating_sub(1));
+                let resolved = suggestions[idx].0.clone();
+                self.messages.push(Message {
+                    role: Role::User,
+                    content: resolved.clone(),
+                    reasoning: None,
+                    tool_calls: None,
+                    tool_group_id: None,
+                    local: true,
+                });
+                if let Some(last) = self.messages.last() {
+                    self.session_record_message(last);
+                }
+                let _ = self.maybe_handle_command(&resolved);
+                self.scroll_messages_to_bottom();
+                self.command_suggest_selected = 0;
+                return;
+            }
+
+            // Unknown command, show help.
+            self.messages.push(Message {
+                role: Role::User,
+                content: user_trimmed.clone(),
+                reasoning: None,
+                tool_calls: None,
+                tool_group_id: None,
+                local: true,
+            });
+            if let Some(last) = self.messages.last() {
+                self.session_record_message(last);
+            }
+
+            let msg = "Unknown command. Try: /plan, /auto, /go, /settings, /themes, /verify, /checkpoint, /checkpoints, /restore, /checkpoint-diff, /new, /resume, /sessions, /help".to_string();
+            self.messages.push(Message {
+                role: Role::Agent,
+                content: msg,
+                reasoning: None,
+                tool_calls: None,
+                tool_group_id: None,
+                local: true,
+            });
+            if let Some(last) = self.messages.last() {
+                self.session_record_message(last);
+            }
+            self.scroll_messages_to_bottom();
+            self.command_suggest_selected = 0;
+            return;
+        }
+
         let user_msg = std::mem::take(&mut self.input);
         let user_msg_for_mem = user_msg.clone();
         self.cursor_pos = 0;
@@ -693,24 +834,14 @@ impl App {
             reasoning: None,
             tool_calls: None,
             tool_group_id: None,
+            local: false,
         });
 
         if let Some(last) = self.messages.last() {
             self.session_record_message(last);
         }
 
-        let last_user = self
-            .messages
-            .iter()
-            .rev()
-            .find(|m| m.role == Role::User)
-            .map(|m| m.content.clone())
-            .unwrap_or_default();
-
-        if self.maybe_handle_command(&last_user) {
-            self.scroll_messages_to_bottom();
-            return;
-        }
+        // Commands are handled before creating a normal user turn above.
 
         let memory_enabled = self
             .config
@@ -759,7 +890,7 @@ impl App {
             .messages
             .iter()
             .rev()
-            .find(|m| m.role == Role::User)
+            .find(|m| m.role == Role::User && !m.local)
             .map(|m| m.content.clone())
             .unwrap_or_default();
 
@@ -782,9 +913,13 @@ impl App {
         let base_chat_messages: Vec<ChatMessage> = self
             .messages
             .iter()
+            .filter(|m| !m.local)
             .filter(|m| !(m.role == Role::System && m.content.starts_with("\n[Memory]\n")))
             .map(|m| m.to_chat_message())
             .collect();
+
+        let (tools_enabled, ephemeral_user) = self.take_next_call_overrides();
+        self.plan_generating = self.plan_mode && !tools_enabled;
 
         let tx = self.event_tx.clone();
         let api_key = self.api_key.clone();
@@ -793,6 +928,27 @@ impl App {
 
         tokio::spawn(async move {
             let mut chat_messages = base_chat_messages;
+
+            if !tools_enabled {
+                // Insert right after the first system prompt (if present).
+                let insert_at = chat_messages
+                    .iter()
+                    .position(|m| m.role == "system")
+                    .map(|idx| idx + 1)
+                    .unwrap_or(0);
+                chat_messages.insert(
+                    insert_at,
+                    ChatMessage {
+                        role: "system".into(),
+                        content: Some(
+                            "You are in PLAN MODE.\n\nReturn ONLY valid JSON (no markdown) with this schema:\n{\n  \"plan\": \"markdown string\",\n  \"questions\": [\n    {\"id\":\"...\",\"prompt\":\"...\",\"type\":\"text|select\",\"options\":[\"...\"],\"default\":\"...\"}\n  ]\n}\n\nRules:\n- Keep plan short and actionable.\n- Include questions only if needed.\n- Do not call tools.\n".into(),
+                        ),
+                        tool_calls: None,
+                        tool_call_id: None,
+                        name: None,
+                    },
+                );
+            }
 
             if inject_memory {
                 let memory_context = memory.build_injection_context(&user_message, &[]).await;
@@ -818,8 +974,279 @@ impl App {
                 }
             }
 
-            call_llm(tx, api_key, model, chat_messages).await;
+            if let Some(msg) = ephemeral_user {
+                chat_messages.push(ChatMessage {
+                    role: "user".into(),
+                    content: Some(msg),
+                    tool_calls: None,
+                    tool_call_id: None,
+                    name: None,
+                });
+            }
+
+            call_llm(tx, api_key, model, chat_messages, tools_enabled).await;
         });
+    }
+
+    fn tools_enabled_for_next_call(&self) -> bool {
+        !self.plan_mode || self.tools_override_next
+    }
+
+    fn take_next_call_overrides(&mut self) -> (bool, Option<String>) {
+        let tools_enabled = self.tools_enabled_for_next_call();
+        let ephemeral_user = self.ephemeral_user_message.take();
+        // /go is a one-shot override.
+        self.tools_override_next = false;
+        (tools_enabled, ephemeral_user)
+    }
+
+    fn prepare_go(&mut self) {
+        self.tools_override_next = true;
+        self.ephemeral_user_message = Some(
+            "Execute the plan above. Start running tools now. Verify when reasonable.".into(),
+        );
+    }
+
+    fn prepare_go_with_plan(&mut self, plan: &PlanDraft) {
+        self.tools_override_next = true;
+        let mut msg = String::new();
+        msg.push_str("Execute the plan below.\n\nPlan:\n");
+        msg.push_str(&plan.plan_markdown);
+        msg.push_str("\n\nAnswers:\n");
+        if plan.questions.is_empty() {
+            msg.push_str("(none)\n");
+        } else {
+            for q in &plan.questions {
+                let ans = plan
+                    .answers
+                    .get(&q.id)
+                    .cloned()
+                    .unwrap_or_else(|| q.default.clone().unwrap_or_default());
+                msg.push_str(&format!("- {}: {}\n", q.prompt, ans));
+            }
+        }
+        msg.push_str("\nStart running tools now. Verify when reasonable.");
+        self.ephemeral_user_message = Some(msg);
+    }
+
+    fn load_plan_answer_input(&mut self) {
+        let Some(draft) = &self.plan_draft else {
+            self.plan_answer_input.clear();
+            self.plan_answer_cursor = 0;
+            return;
+        };
+        let Some(q) = draft.questions.get(self.plan_question_selected) else {
+            self.plan_answer_input.clear();
+            self.plan_answer_cursor = 0;
+            return;
+        };
+        let val = draft
+            .answers
+            .get(&q.id)
+            .cloned()
+            .or_else(|| q.default.clone())
+            .unwrap_or_default();
+        self.plan_answer_input = val;
+        self.plan_answer_cursor = self.plan_answer_input.len();
+    }
+
+    fn save_plan_answer_input(&mut self) {
+        let Some(draft) = &mut self.plan_draft else {
+            return;
+        };
+        let Some(q) = draft.questions.get(self.plan_question_selected) else {
+            return;
+        };
+        draft
+            .answers
+            .insert(q.id.clone(), self.plan_answer_input.clone());
+    }
+
+    fn handle_plan_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => {
+                self.plan_popup_open = false;
+            }
+            KeyCode::Tab => {
+                self.plan_focus = match self.plan_focus {
+                    PlanFocus::Questions => PlanFocus::Answer,
+                    PlanFocus::Answer => PlanFocus::Buttons,
+                    PlanFocus::Buttons => PlanFocus::Questions,
+                };
+            }
+            KeyCode::BackTab => {
+                self.plan_focus = match self.plan_focus {
+                    PlanFocus::Questions => PlanFocus::Buttons,
+                    PlanFocus::Answer => PlanFocus::Questions,
+                    PlanFocus::Buttons => PlanFocus::Answer,
+                };
+            }
+            KeyCode::Up => match self.plan_focus {
+                PlanFocus::Questions => {
+                    if self.plan_question_selected > 0 {
+                        self.save_plan_answer_input();
+                        self.plan_question_selected -= 1;
+                        self.load_plan_answer_input();
+                    }
+                }
+                PlanFocus::Answer => {
+                    if self.plan_selected_question_kind() == Some(PlanQuestionKind::Select) {
+                        self.plan_select_prev_option();
+                    }
+                }
+                PlanFocus::Buttons => {}
+            },
+            KeyCode::Down => match self.plan_focus {
+                PlanFocus::Questions => {
+                    let max = self
+                        .plan_draft
+                        .as_ref()
+                        .map(|d| d.questions.len())
+                        .unwrap_or(0);
+                    if self.plan_question_selected + 1 < max {
+                        self.save_plan_answer_input();
+                        self.plan_question_selected += 1;
+                        self.load_plan_answer_input();
+                    }
+                }
+                PlanFocus::Answer => {
+                    if self.plan_selected_question_kind() == Some(PlanQuestionKind::Select) {
+                        self.plan_select_next_option();
+                    }
+                }
+                PlanFocus::Buttons => {}
+            },
+            KeyCode::Left => match self.plan_focus {
+                PlanFocus::Answer => {
+                    self.plan_answer_cursor = self.plan_answer_cursor.saturating_sub(1);
+                }
+                PlanFocus::Buttons => {
+                    self.plan_button_selected = self.plan_button_selected.saturating_sub(1);
+                }
+                _ => {}
+            },
+            KeyCode::Right => match self.plan_focus {
+                PlanFocus::Answer => {
+                    self.plan_answer_cursor = (self.plan_answer_cursor + 1).min(self.plan_answer_input.len());
+                }
+                PlanFocus::Buttons => {
+                    self.plan_button_selected = (self.plan_button_selected + 1).min(1);
+                }
+                _ => {}
+            },
+            KeyCode::Home => {
+                if matches!(self.plan_focus, PlanFocus::Answer) {
+                    self.plan_answer_cursor = 0;
+                }
+            }
+            KeyCode::End => {
+                if matches!(self.plan_focus, PlanFocus::Answer) {
+                    self.plan_answer_cursor = self.plan_answer_input.len();
+                }
+            }
+            KeyCode::PageUp => {
+                if matches!(self.plan_focus, PlanFocus::Answer) {
+                    self.plan_preview_scroll = self.plan_preview_scroll.saturating_sub(5);
+                }
+            }
+            KeyCode::PageDown => {
+                if matches!(self.plan_focus, PlanFocus::Answer) {
+                    self.plan_preview_scroll = self.plan_preview_scroll.saturating_add(5);
+                }
+            }
+            KeyCode::Backspace => {
+                if matches!(self.plan_focus, PlanFocus::Answer)
+                    && self.plan_selected_question_kind() == Some(PlanQuestionKind::Text)
+                    && self.plan_answer_cursor > 0
+                {
+                    self.plan_answer_cursor -= 1;
+                    self.plan_answer_input.remove(self.plan_answer_cursor);
+                    self.save_plan_answer_input();
+                }
+            }
+            KeyCode::Delete => {
+                if matches!(self.plan_focus, PlanFocus::Answer)
+                    && self.plan_selected_question_kind() == Some(PlanQuestionKind::Text)
+                    && self.plan_answer_cursor < self.plan_answer_input.len()
+                {
+                    self.plan_answer_input.remove(self.plan_answer_cursor);
+                    self.save_plan_answer_input();
+                }
+            }
+            KeyCode::Enter => {
+                if matches!(self.plan_focus, PlanFocus::Buttons) {
+                    if self.plan_button_selected == 0 {
+                        // Execute
+                        if self.is_processing {
+                            return;
+                        }
+                        if let Some(draft) = self.plan_draft.clone() {
+                            self.plan_popup_open = false;
+                            self.prepare_go_with_plan(&draft);
+                            self.start_llm_call();
+                        } else {
+                            self.plan_popup_open = false;
+                        }
+                    } else {
+                        // Cancel
+                        self.plan_popup_open = false;
+                    }
+                }
+            }
+            KeyCode::Char(c) => {
+                if matches!(self.plan_focus, PlanFocus::Answer)
+                    && self.plan_selected_question_kind() == Some(PlanQuestionKind::Text)
+                {
+                    self.plan_answer_input.insert(self.plan_answer_cursor, c);
+                    self.plan_answer_cursor += 1;
+                    self.save_plan_answer_input();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    pub(crate) fn plan_selected_question_kind(&self) -> Option<PlanQuestionKind> {
+        self.plan_draft
+            .as_ref()
+            .and_then(|d| d.questions.get(self.plan_question_selected))
+            .map(|q| q.kind)
+    }
+
+    fn plan_select_next_option(&mut self) {
+        let Some(draft) = &self.plan_draft else {
+            return;
+        };
+        let Some(q) = draft.questions.get(self.plan_question_selected) else {
+            return;
+        };
+        if q.options.is_empty() {
+            return;
+        }
+        let cur = self.plan_answer_input.clone();
+        let idx = q.options.iter().position(|o| o == &cur).unwrap_or(0);
+        let next = (idx + 1) % q.options.len();
+        self.plan_answer_input = q.options[next].clone();
+        self.plan_answer_cursor = self.plan_answer_input.len();
+        self.save_plan_answer_input();
+    }
+
+    fn plan_select_prev_option(&mut self) {
+        let Some(draft) = &self.plan_draft else {
+            return;
+        };
+        let Some(q) = draft.questions.get(self.plan_question_selected) else {
+            return;
+        };
+        if q.options.is_empty() {
+            return;
+        }
+        let cur = self.plan_answer_input.clone();
+        let idx = q.options.iter().position(|o| o == &cur).unwrap_or(0);
+        let prev = if idx == 0 { q.options.len() - 1 } else { idx - 1 };
+        self.plan_answer_input = q.options[prev].clone();
+        self.plan_answer_cursor = self.plan_answer_input.len();
+        self.save_plan_answer_input();
     }
 
     fn scroll_messages_to_bottom(&mut self) {
@@ -827,8 +1254,16 @@ impl App {
     }
 
     fn handle_key(&mut self, key: KeyEvent) {
+        if self.plan_popup_open {
+            self.handle_plan_key(key);
+            return;
+        }
         if self.settings_open {
             self.handle_settings_key(key);
+            return;
+        }
+        if self.themes_open {
+            self.handle_themes_key(key);
             return;
         }
 
@@ -849,6 +1284,9 @@ impl App {
         match key.code {
             KeyCode::Esc => self.should_quit = true,
             KeyCode::Tab => {
+                self.plan_mode = !self.plan_mode;
+            }
+            KeyCode::BackTab => {
                 self.active_pane = match self.active_pane {
                     Pane::Chat => Pane::Context,
                     Pane::Context => Pane::Chat,
@@ -859,11 +1297,13 @@ impl App {
                 if self.cursor_pos > 0 {
                     self.cursor_pos -= 1;
                     self.input.remove(self.cursor_pos);
+                    self.command_suggest_selected = 0;
                 }
             }
             KeyCode::Delete => {
                 if self.cursor_pos < self.input.len() {
                     self.input.remove(self.cursor_pos);
+                    self.command_suggest_selected = 0;
                 }
             }
             KeyCode::Left => {
@@ -875,6 +1315,17 @@ impl App {
             KeyCode::Home => self.cursor_pos = 0,
             KeyCode::End => self.cursor_pos = self.input.len(),
             KeyCode::Up => {
+                if !key.modifiers.contains(KeyModifiers::SHIFT)
+                    && self.active_pane == Pane::Chat
+                    && self.input.trim_start().starts_with('/')
+                {
+                    let suggestions = self.command_suggestions(self.input.trim_start());
+                    if !suggestions.is_empty() {
+                        self.command_suggest_selected =
+                            self.command_suggest_selected.saturating_sub(1);
+                        return;
+                    }
+                }
                 if key.modifiers.contains(KeyModifiers::SHIFT) {
                     match self.active_pane {
                         Pane::Chat => {
@@ -886,6 +1337,18 @@ impl App {
                 }
             }
             KeyCode::Down => {
+                if !key.modifiers.contains(KeyModifiers::SHIFT)
+                    && self.active_pane == Pane::Chat
+                    && self.input.trim_start().starts_with('/')
+                {
+                    let suggestions = self.command_suggestions(self.input.trim_start());
+                    if !suggestions.is_empty() {
+                        let max = suggestions.len().saturating_sub(1);
+                        self.command_suggest_selected =
+                            (self.command_suggest_selected + 1).min(max);
+                        return;
+                    }
+                }
                 if key.modifiers.contains(KeyModifiers::SHIFT) {
                     match self.active_pane {
                         Pane::Chat => {
@@ -948,6 +1411,9 @@ impl App {
             KeyCode::Char(c) => {
                 self.input.insert(self.cursor_pos, c);
                 self.cursor_pos += 1;
+                if self.input.trim_start().starts_with('/') {
+                    self.command_suggest_selected = 0;
+                }
             }
             _ => {}
         }
@@ -956,45 +1422,94 @@ impl App {
     fn handle_settings_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Esc => {
+                // Revert any live preview changes made while settings are open.
+                self.config = self.settings_original.clone();
+                self.sandbox_policy = Arc::new(SandboxPolicy::from_config(
+                    self.config.clone(),
+                    self.workspace_root.clone(),
+                    crate::tools::TOOL_NAMES,
+                ));
                 self.settings_open = false;
                 self.settings_input.clear();
                 self.settings_cursor = 0;
             }
-            KeyCode::Up => {
-                if self.settings_selected > 0 {
-                    self.settings_selected -= 1;
-                    self.load_settings_input();
+            KeyCode::Up => match self.settings_focus {
+                SettingsFocus::Categories => {
+                    if self.settings_category_selected > 0 {
+                        self.settings_category_selected -= 1;
+                        self.settings_selected = 0;
+                        self.load_settings_input();
+                    }
                 }
-            }
-            KeyCode::Down => {
-                if self.settings_selected + 1 < self.settings_items().len() {
-                    self.settings_selected += 1;
-                    self.load_settings_input();
+                SettingsFocus::Items => {
+                    if self.settings_selected > 0 {
+                        self.settings_selected -= 1;
+                        self.load_settings_input();
+                    }
                 }
-            }
+            },
+            KeyCode::Down => match self.settings_focus {
+                SettingsFocus::Categories => {
+                    if self.settings_category_selected + 1 < self.settings_categories().len() {
+                        self.settings_category_selected += 1;
+                        self.settings_selected = 0;
+                        self.load_settings_input();
+                    }
+                }
+                SettingsFocus::Items => {
+                    if self.settings_selected + 1 < self.current_settings_items().len() {
+                        self.settings_selected += 1;
+                        self.load_settings_input();
+                    }
+                }
+            },
             KeyCode::Tab => {
-                self.settings_selected = (self.settings_selected + 1) % self.settings_items().len();
-                self.load_settings_input();
+                self.settings_focus = match self.settings_focus {
+                    SettingsFocus::Categories => SettingsFocus::Items,
+                    SettingsFocus::Items => SettingsFocus::Categories,
+                };
             }
             KeyCode::Backspace => {
+                if matches!(self.settings_focus, SettingsFocus::Categories) {
+                    return;
+                }
                 if self.settings_cursor > 0 {
                     self.settings_cursor -= 1;
                     self.settings_input.remove(self.settings_cursor);
                 }
             }
             KeyCode::Left => {
-                self.settings_cursor = self.settings_cursor.saturating_sub(1);
+                if matches!(self.settings_focus, SettingsFocus::Categories) {
+                    return;
+                }
+                if self.current_settings_item() == SettingsItem::ThemePreset {
+                    self.cycle_theme_preset(false);
+                } else {
+                    self.settings_cursor = self.settings_cursor.saturating_sub(1);
+                }
             }
             KeyCode::Right => {
-                if self.settings_cursor < self.settings_input.len() {
+                if matches!(self.settings_focus, SettingsFocus::Categories) {
+                    return;
+                }
+                if self.current_settings_item() == SettingsItem::ThemePreset {
+                    self.cycle_theme_preset(true);
+                } else if self.settings_cursor < self.settings_input.len() {
                     self.settings_cursor += 1;
                 }
             }
             KeyCode::Char(c) => {
+                if matches!(self.settings_focus, SettingsFocus::Categories) {
+                    return;
+                }
                 self.settings_input.insert(self.settings_cursor, c);
                 self.settings_cursor += 1;
             }
             KeyCode::Enter => {
+                if matches!(self.settings_focus, SettingsFocus::Categories) {
+                    self.settings_focus = SettingsFocus::Items;
+                    return;
+                }
                 self.apply_settings_input();
                 let _ = self.settings_draft.save();
                 self.config = self.settings_draft.clone();
@@ -1020,29 +1535,33 @@ impl App {
         }
     }
 
-    fn settings_items(&self) -> Vec<SettingsItem> {
+    fn settings_categories(&self) -> Vec<SettingsCategory> {
         vec![
-            SettingsItem::Model,
-            SettingsItem::SplitRatio,
-            SettingsItem::AutoIndex,
-            SettingsItem::ResumeLastSession,
-            SettingsItem::MemoryEnabled,
-            SettingsItem::MemoryAutoInject,
-            SettingsItem::MemoryAutoLearnFailures,
-            SettingsItem::MemoryAutoLearnUser,
-            SettingsItem::MemoryAutoExtract,
-            SettingsItem::MemoryExtractionModel,
-            SettingsItem::SandboxEnabled,
-            SettingsItem::SandboxRoot,
-            SettingsItem::SandboxAllowPaths,
-            SettingsItem::SandboxDenyPaths,
-            SettingsItem::SandboxAllowCommands,
-            SettingsItem::SandboxAllowTools,
+            SettingsCategory::General,
+            SettingsCategory::Appearance,
+            SettingsCategory::Memory,
+            SettingsCategory::Sandbox,
         ]
     }
 
+    fn current_settings_items(&self) -> &'static [SettingsItem] {
+        let cats = self.settings_categories();
+        let cat = cats
+            .get(self.settings_category_selected)
+            .copied()
+            .unwrap_or(SettingsCategory::General);
+        cat.items()
+    }
+
+    fn current_settings_item(&self) -> SettingsItem {
+        let items = self.current_settings_items();
+        *items
+            .get(self.settings_selected)
+            .unwrap_or(&SettingsItem::Model)
+    }
+
     fn load_settings_input(&mut self) {
-        let current = self.read_settings_value(self.settings_items()[self.settings_selected]);
+        let current = self.read_settings_value(self.current_settings_item());
         self.settings_input = current;
         self.settings_cursor = self.settings_input.len();
     }
@@ -1055,6 +1574,7 @@ impl App {
                 .as_ref()
                 .and_then(|g| g.model.clone())
                 .unwrap_or_else(|| crate::llm::MODEL.to_string()),
+            SettingsItem::ThemePreset => crate::theme::ui_theme_name(&self.settings_draft),
             SettingsItem::SplitRatio => self
                 .settings_draft
                 .general
@@ -1163,7 +1683,7 @@ impl App {
     }
 
     fn apply_settings_input(&mut self) {
-        let item = self.settings_items()[self.settings_selected];
+        let item = self.current_settings_item();
         match item {
             SettingsItem::Model => {
                 let mut general = self.settings_draft.general.clone().unwrap_or_default();
@@ -1171,6 +1691,16 @@ impl App {
                 general.model = Some(value.clone());
                 self.settings_draft.general = Some(general);
                 self.model = value;
+            }
+            SettingsItem::ThemePreset => {
+                let mut theme_cfg = self.settings_draft.theme.clone().unwrap_or_default();
+                let v = self.settings_input.trim();
+                if v.is_empty() {
+                    theme_cfg.preset = None;
+                } else {
+                    theme_cfg.preset = Some(v.to_string());
+                }
+                self.settings_draft.theme = Some(theme_cfg);
             }
             SettingsItem::SplitRatio => {
                 if let Ok(val) = self.settings_input.trim().parse::<u16>() {
@@ -1281,17 +1811,393 @@ impl App {
 
     pub fn open_settings(&mut self) {
         self.settings_open = true;
+        self.settings_focus = SettingsFocus::Items;
+        self.settings_category_selected = 0;
         self.settings_selected = 0;
+        self.settings_original = self.config.clone();
         self.settings_draft = self.config.clone();
         self.settings_input.clear();
         self.settings_cursor = 0;
         self.load_settings_input();
     }
 
+    fn handle_themes_key(&mut self, key: KeyEvent) {
+        match key.code {
+            KeyCode::Esc => {
+                self.themes_open = false;
+                self.themes_query.clear();
+                self.themes_cursor = 0;
+                self.themes_selected = 0;
+            }
+            KeyCode::Up => {
+                if self.themes_selected > 0 {
+                    self.themes_selected -= 1;
+                }
+            }
+            KeyCode::Down => {
+                let items = self.filtered_themes();
+                if self.themes_selected + 1 < items.len() {
+                    self.themes_selected += 1;
+                }
+            }
+            KeyCode::Backspace => {
+                if self.themes_cursor > 0 && self.themes_cursor <= self.themes_query.len() {
+                    self.themes_cursor -= 1;
+                    self.themes_query.remove(self.themes_cursor);
+                    self.themes_selected = 0;
+                }
+            }
+            KeyCode::Left => {
+                self.themes_cursor = self.themes_cursor.saturating_sub(1);
+            }
+            KeyCode::Right => {
+                if self.themes_cursor < self.themes_query.len() {
+                    self.themes_cursor += 1;
+                }
+            }
+            KeyCode::Char(c) => {
+                self.themes_query.insert(self.themes_cursor, c);
+                self.themes_cursor += 1;
+                self.themes_selected = 0;
+            }
+            KeyCode::Enter => {
+                let items = self.filtered_themes();
+                if let Some(name) = items.get(self.themes_selected).cloned() {
+                    let mut theme_cfg = self.config.theme.clone().unwrap_or_default();
+                    if name == "system" {
+                        theme_cfg.preset = Some("system".to_string());
+                    } else {
+                        theme_cfg.preset = Some(name);
+                    }
+                    self.config.theme = Some(theme_cfg.clone());
+                    // Persist immediately.
+                    let _ = self.config.save();
+                    // Keep settings draft in sync if settings is opened later.
+                    self.settings_draft.theme = Some(theme_cfg);
+                }
+                self.themes_open = false;
+            }
+            _ => {}
+        }
+    }
+
+    pub fn open_themes(&mut self) {
+        self.themes_open = true;
+        self.themes_query.clear();
+        self.themes_cursor = 0;
+        self.themes_selected = 0;
+    }
+
+    pub fn filtered_themes(&self) -> Vec<String> {
+        let all = crate::theme::list_ui_themes(Some(&self.workspace_root));
+        let q = self.themes_query.trim().to_lowercase();
+        if q.is_empty() {
+            return all;
+        }
+        all.into_iter()
+            .filter(|t| t.to_lowercase().contains(&q))
+            .collect()
+    }
+
+    fn cycle_theme_preset(&mut self, next: bool) {
+        let themes = crate::theme::list_ui_themes(Some(&self.workspace_root));
+        let cur = crate::theme::ui_theme_name(&self.settings_draft);
+        let idx = themes.iter().position(|t| t == &cur).unwrap_or(0);
+        let new_idx = if themes.is_empty() {
+            0
+        } else if next {
+            (idx + 1) % themes.len()
+        } else if idx == 0 {
+            themes.len() - 1
+        } else {
+            idx - 1
+        };
+        let new = themes
+            .get(new_idx)
+            .cloned()
+            .unwrap_or_else(|| "system".to_string());
+
+        let mut theme_cfg = self.settings_draft.theme.clone().unwrap_or_default();
+        theme_cfg.preset = Some(new.clone());
+        self.settings_draft.theme = Some(theme_cfg);
+
+        // Live preview while settings modal is open.
+        self.config = self.settings_draft.clone();
+        self.settings_input = new;
+        self.settings_cursor = self.settings_input.len();
+    }
+
     pub fn maybe_handle_command(&mut self, input: &str) -> bool {
         let trimmed = input.trim();
-        if trimmed == "/settings" || trimmed == "/ settings" {
+        if trimmed == "/plan" {
+            self.plan_mode = true;
+            return true;
+        }
+        if trimmed == "/auto" {
+            self.plan_mode = false;
+            return true;
+        }
+        if trimmed == "/go" {
+            if self.is_processing {
+                return true;
+            }
+            self.prepare_go();
+            self.start_llm_call();
+            return true;
+        }
+        if matches!(trimmed, "/settings" | "/ settings" | "/s") {
             self.open_settings();
+            return true;
+        }
+        if matches!(trimmed, "/themes" | "/theme" | "/t") {
+            self.open_themes();
+            return true;
+        }
+        if trimmed.starts_with("/checkpoint-diff") {
+            let arg = trimmed
+                .trim_start_matches("/checkpoint-diff")
+                .trim()
+                .to_string();
+            let target = if arg.is_empty() || arg == "latest" {
+                checkpoints::list_checkpoints(&self.workspace_root, 1)
+                    .ok()
+                    .and_then(|v| v.into_iter().next())
+            } else {
+                checkpoints::load_checkpoint_meta(&self.workspace_root, &arg).ok()
+            };
+            let Some(meta) = target else {
+                self.messages.push(Message {
+                    role: Role::Agent,
+                    content: "No checkpoint found. Usage: /checkpoint-diff <id|latest>".into(),
+                    reasoning: None,
+                    tool_calls: None,
+                    tool_group_id: None,
+                    local: true,
+                });
+                self.scroll_messages_to_bottom();
+                if let Some(last) = self.messages.last() {
+                    self.session_record_message(last);
+                }
+                return true;
+            };
+            match checkpoints::checkpoint_diff_summary(&self.workspace_root, &meta) {
+                Ok(s) => {
+                    self.messages.push(Message {
+                        role: Role::Agent,
+                        content: s,
+                        reasoning: None,
+                        tool_calls: None,
+                        tool_group_id: None,
+                        local: true,
+                    });
+                    self.scroll_messages_to_bottom();
+                    if let Some(last) = self.messages.last() {
+                        self.session_record_message(last);
+                    }
+                }
+                Err(e) => {
+                    self.messages.push(Message {
+                        role: Role::Agent,
+                        content: format!("Checkpoint diff error: {}", e),
+                        reasoning: None,
+                        tool_calls: None,
+                        tool_group_id: None,
+                        local: true,
+                    });
+                    self.scroll_messages_to_bottom();
+                }
+            }
+            return true;
+        }
+        if trimmed.starts_with("/checkpoint") {
+            if self.session.is_none() {
+                self.new_session();
+            }
+            let Some(store) = self.session.as_ref() else {
+                return true;
+            };
+            let name = trimmed.trim_start_matches("/checkpoint").trim();
+            let name = if name.is_empty() {
+                None
+            } else {
+                Some(name.to_string())
+            };
+            match checkpoints::create_checkpoint(&self.workspace_root, store, name) {
+                Ok(meta) => {
+                    self.last_checkpoint = Some(meta.clone());
+                    self.messages.push(Message {
+                        role: Role::Agent,
+                        content: format!(
+                            "Checkpoint created: {} ({:?})",
+                            meta.id, meta.backend
+                        ),
+                        reasoning: None,
+                        tool_calls: None,
+                        tool_group_id: None,
+                        local: true,
+                    });
+                    self.scroll_messages_to_bottom();
+                    if let Some(last) = self.messages.last() {
+                        self.session_record_message(last);
+                    }
+                }
+                Err(e) => {
+                    self.messages.push(Message {
+                        role: Role::Agent,
+                        content: format!("Checkpoint error: {}", e),
+                        reasoning: None,
+                        tool_calls: None,
+                        tool_group_id: None,
+                        local: true,
+                    });
+                    self.scroll_messages_to_bottom();
+                }
+            }
+            return true;
+        }
+        if trimmed == "/checkpoints" {
+            let metas = checkpoints::list_checkpoints(&self.workspace_root, 10).unwrap_or_default();
+            if metas.is_empty() {
+                self.messages.push(Message {
+                    role: Role::Agent,
+                    content: "No checkpoints yet. Use /checkpoint".into(),
+                    reasoning: None,
+                    tool_calls: None,
+                    tool_group_id: None,
+                    local: true,
+                });
+                self.scroll_messages_to_bottom();
+                if let Some(last) = self.messages.last() {
+                    self.session_record_message(last);
+                }
+                return true;
+            }
+            let mut out = String::new();
+            out.push_str("Checkpoints:\n");
+            for m in metas {
+                let nm = m.name.clone().unwrap_or_default();
+                let nm = if nm.is_empty() { "".to_string() } else { format!(" — {}", nm) };
+                out.push_str(&format!(
+                    "- {} ({:?}){}\n",
+                    m.id, m.backend, nm
+                ));
+            }
+            self.messages.push(Message {
+                role: Role::Agent,
+                content: out.trim_end().to_string(),
+                reasoning: None,
+                tool_calls: None,
+                tool_group_id: None,
+                local: true,
+            });
+            self.scroll_messages_to_bottom();
+            if let Some(last) = self.messages.last() {
+                self.session_record_message(last);
+            }
+            return true;
+        }
+        if trimmed.starts_with("/restore") {
+            if self.is_processing
+                || self
+                    .tool_outputs
+                    .iter()
+                    .any(|t| t.status == ToolStatus::Running)
+            {
+                self.messages.push(Message {
+                    role: Role::Agent,
+                    content: "Cannot restore while agent/tools are running.".into(),
+                    reasoning: None,
+                    tool_calls: None,
+                    tool_group_id: None,
+                    local: true,
+                });
+                self.scroll_messages_to_bottom();
+                return true;
+            }
+
+            if self.session.is_none() {
+                self.new_session();
+            }
+            let Some(store) = self.session.as_ref() else {
+                return true;
+            };
+
+            let arg = trimmed.trim_start_matches("/restore").trim();
+            let meta = if arg.is_empty() || arg == "latest" {
+                checkpoints::list_checkpoints(&self.workspace_root, 1)
+                    .ok()
+                    .and_then(|v| v.into_iter().next())
+            } else {
+                checkpoints::load_checkpoint_meta(&self.workspace_root, arg).ok()
+            };
+            let Some(meta) = meta else {
+                self.messages.push(Message {
+                    role: Role::Agent,
+                    content: "No checkpoint found. Usage: /restore <id|latest>".into(),
+                    reasoning: None,
+                    tool_calls: None,
+                    tool_group_id: None,
+                    local: true,
+                });
+                self.scroll_messages_to_bottom();
+                return true;
+            };
+
+            if let Err(e) = checkpoints::restore_checkpoint(&self.workspace_root, store, &meta) {
+                self.messages.push(Message {
+                    role: Role::Agent,
+                    content: format!("Restore error: {}", e),
+                    reasoning: None,
+                    tool_calls: None,
+                    tool_group_id: None,
+                    local: true,
+                });
+                self.scroll_messages_to_bottom();
+                return true;
+            }
+
+            if let Err(e) = checkpoints::truncate_session_to(store, meta.session_event_count) {
+                self.messages.push(Message {
+                    role: Role::Agent,
+                    content: format!("Session rewind error: {}", e),
+                    reasoning: None,
+                    tool_calls: None,
+                    tool_group_id: None,
+                    local: true,
+                });
+                self.scroll_messages_to_bottom();
+                return true;
+            }
+
+            // Reload the rewound session so UI matches the restored timeline.
+            self.init_session(true);
+            self.last_checkpoint = Some(meta.clone());
+            self.messages.push(Message {
+                role: Role::Agent,
+                content: format!("(restored checkpoint {})", meta.id),
+                reasoning: None,
+                tool_calls: None,
+                tool_group_id: None,
+                local: true,
+            });
+            self.scroll_messages_to_bottom();
+            return true;
+        }
+        if matches!(trimmed, "/help" | "/h" | "/?") {
+            self.messages.push(Message {
+                role: Role::Agent,
+                content:
+                    "Commands: /plan, /auto, /go, /settings (/s), /themes (/t), /verify, /checkpoint, /checkpoints, /restore, /checkpoint-diff, /new, /resume, /sessions"
+                        .into(),
+                reasoning: None,
+                tool_calls: None,
+                tool_group_id: None,
+                local: true,
+            });
+            self.scroll_messages_to_bottom();
+            if let Some(last) = self.messages.last() {
+                self.session_record_message(last);
+            }
             return true;
         }
         if trimmed == "/new" {
@@ -1318,6 +2224,7 @@ impl App {
                 reasoning: None,
                 tool_calls: None,
                 tool_group_id: None,
+                local: true,
             });
             self.scroll_messages_to_bottom();
             return true;
@@ -1338,6 +2245,7 @@ impl App {
                     reasoning: None,
                     tool_calls: None,
                     tool_group_id: None,
+                    local: true,
                 });
                 self.scroll_messages_to_bottom();
                 if let Some(last) = self.messages.last() {
@@ -1364,6 +2272,7 @@ impl App {
                 reasoning: None,
                 tool_calls: None,
                 tool_group_id: Some(group_id),
+                local: true,
             });
             self.scroll_messages_to_bottom();
             if let Some(last) = self.messages.last() {
@@ -1431,6 +2340,7 @@ impl App {
                 reasoning: None,
                 tool_calls: None,
                 tool_group_id: None,
+                local: true,
             });
             self.scroll_messages_to_bottom();
             if let Some(last) = self.messages.last() {
@@ -1441,11 +2351,65 @@ impl App {
         false
     }
 
+    pub fn command_suggestions(&self, prefix: &str) -> Vec<(String, String)> {
+        let p = prefix.trim().to_lowercase();
+        if !p.starts_with('/') {
+            return Vec::new();
+        }
+
+        let all: Vec<(String, String)> = vec![
+            ("/plan".into(), "Plan mode (no tools)".into()),
+            ("/auto".into(), "Normal mode (tools)".into()),
+            ("/go".into(), "Execute plan (tools once)".into()),
+            ("/settings".into(), "Open settings".into()),
+            ("/themes".into(), "Pick a theme".into()),
+            ("/verify".into(), "Run suggested verify".into()),
+            ("/checkpoint".into(), "Create checkpoint".into()),
+            ("/checkpoints".into(), "List checkpoints".into()),
+            ("/restore".into(), "Restore checkpoint".into()),
+            ("/checkpoint-diff".into(), "Show checkpoint diff".into()),
+            ("/new".into(), "New session".into()),
+            ("/resume".into(), "Resume last session".into()),
+            ("/sessions".into(), "Show sessions dir".into()),
+            ("/help".into(), "Show commands".into()),
+        ];
+
+        // Aliases.
+        let expanded = match p.as_str() {
+            "/s" => "/settings",
+            "/t" => "/themes",
+            _ => "",
+        };
+
+        let mut out = Vec::new();
+        for (cmd, desc) in all {
+            if cmd.starts_with(&p) || (!expanded.is_empty() && cmd == expanded) {
+                out.push((cmd, desc));
+            }
+        }
+        out
+    }
+
     pub fn settings_rows(&self) -> Vec<(String, String)> {
-        self.settings_items()
+        self.current_settings_items()
             .iter()
             .map(|item| (item.label().to_string(), self.read_settings_value(*item)))
             .collect()
+    }
+
+    pub fn settings_category_rows(&self) -> Vec<String> {
+        self.settings_categories()
+            .iter()
+            .map(|c| c.label().to_string())
+            .collect()
+    }
+
+    pub fn settings_focus_is_categories(&self) -> bool {
+        matches!(self.settings_focus, SettingsFocus::Categories)
+    }
+
+    pub fn settings_selected_label(&self) -> String {
+        self.current_settings_item().label().to_string()
     }
 
     fn handle_mouse(&mut self, mouse: MouseEvent, chat_area: Rect, context_area: Rect) {
@@ -1517,6 +2481,36 @@ impl App {
                 let reasoning = std::mem::take(&mut self.current_reasoning);
                 let response_for_mem = response.clone();
 
+                if self.plan_generating {
+                    self.plan_generating = false;
+                    let parsed = parse_plan_response(&response);
+                    match parsed {
+                        Ok(draft) => {
+                            self.plan_draft = Some(draft);
+                            self.plan_parse_error = None;
+                        }
+                        Err(e) => {
+                            self.plan_draft = Some(PlanDraft {
+                                plan_markdown: response.clone(),
+                                questions: Vec::new(),
+                                answers: HashMap::new(),
+                            });
+                            self.plan_parse_error = Some(e);
+                        }
+                    }
+
+                    self.plan_popup_open = true;
+                    self.plan_focus = PlanFocus::Questions;
+                    self.plan_question_selected = 0;
+                    self.plan_button_selected = 0;
+                    self.plan_preview_scroll = 0;
+                    self.load_plan_answer_input();
+
+                    self.is_processing = false;
+                    self.processing_start = None;
+                    return;
+                }
+
                 if !response.is_empty() || !reasoning.is_empty() {
                     self.messages.push(Message {
                         role: Role::Agent,
@@ -1528,6 +2522,7 @@ impl App {
                         },
                         tool_calls: None,
                         tool_group_id: None,
+                        local: false,
                     });
                     self.scroll_messages_to_bottom();
                     if let Some(last) = self.messages.last() {
@@ -1616,6 +2611,7 @@ impl App {
                     },
                     tool_calls: Some(tool_calls.clone()),
                     tool_group_id: Some(group_id),
+                    local: false,
                 });
                 self.scroll_messages_to_bottom();
                 if let Some(last) = self.messages.last() {
@@ -1876,6 +2872,7 @@ impl App {
                         reasoning: Some(tool_call_id), // Store tool_call_id here
                         tool_calls: None,
                         tool_group_id: None,
+                        local: false,
                     });
                 }
 
@@ -1888,6 +2885,7 @@ impl App {
                             reasoning: None,
                             tool_calls: None,
                             tool_group_id: None,
+                            local: true,
                         });
                         self.scroll_messages_to_bottom();
                         self.is_processing = false;
@@ -1906,6 +2904,7 @@ impl App {
                     reasoning: None,
                     tool_calls: None,
                     tool_group_id: None,
+                    local: true,
                 });
                 self.scroll_messages_to_bottom();
                 self.is_processing = false;
@@ -2078,11 +3077,204 @@ impl App {
     pub fn workspace_root_display(&self) -> String {
         self.workspace_root.display().to_string()
     }
+
+    pub fn workspace_root_path(&self) -> &std::path::Path {
+        &self.workspace_root
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
+pub(crate) enum PlanFocus {
+    Questions,
+    Answer,
+    Buttons,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct PlanQuestion {
+    pub id: String,
+    pub prompt: String,
+    pub kind: PlanQuestionKind,
+    pub options: Vec<String>,
+    pub default: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PlanQuestionKind {
+    Text,
+    Select,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct PlanDraft {
+    pub plan_markdown: String,
+    pub questions: Vec<PlanQuestion>,
+    pub answers: HashMap<String, String>,
+}
+
+fn parse_plan_response(raw: &str) -> Result<PlanDraft, String> {
+    fn strip_code_fences(s: &str) -> &str {
+        let t = s.trim();
+        if !t.starts_with("```") {
+            return t;
+        }
+        // Handle ```json\n{...}\n``` or ```\n{...}\n```.
+        let Some(nl) = t.find('\n') else {
+            return t;
+        };
+        let inner = t[nl + 1..].trim();
+        if let Some(end) = inner.rfind("```") {
+            inner[..end].trim()
+        } else {
+            inner
+        }
+    }
+
+    fn extract_json_object(s: &str) -> Option<&str> {
+        let t = s.trim();
+        let start = t.find('{')?;
+        let end = t.rfind('}')?;
+        if end <= start {
+            return None;
+        }
+        Some(&t[start..=end])
+    }
+
+    let cleaned = strip_code_fences(raw);
+    let value: serde_json::Value = match serde_json::from_str(cleaned) {
+        Ok(v) => v,
+        Err(_) => {
+            let Some(obj) = extract_json_object(cleaned) else {
+                return Err("Expected JSON object response".into());
+            };
+            serde_json::from_str(obj).map_err(|e| format!("Invalid JSON: {e}"))?
+        }
+    };
+
+    let obj = value
+        .as_object()
+        .ok_or_else(|| "Expected top-level JSON object".to_string())?;
+
+    let plan_markdown = obj
+        .get("plan")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "Missing required field: plan".to_string())?
+        .to_string();
+
+    let mut questions = Vec::new();
+    if let Some(qs) = obj.get("questions").and_then(|v| v.as_array()) {
+        for (idx, qv) in qs.iter().enumerate() {
+            let qobj = match qv.as_object() {
+                Some(o) => o,
+                None => continue,
+            };
+            let id = qobj
+                .get("id")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.trim().is_empty())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| format!("q{}", idx + 1));
+            let prompt = qobj
+                .get("prompt")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.trim().is_empty())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| id.clone());
+
+            let kind = match qobj.get("type").and_then(|v| v.as_str()) {
+                Some(t) if t.eq_ignore_ascii_case("select") => PlanQuestionKind::Select,
+                _ => PlanQuestionKind::Text,
+            };
+
+            let options = qobj
+                .get("options")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+
+            let default = qobj
+                .get("default")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+
+            questions.push(PlanQuestion {
+                id,
+                prompt,
+                kind,
+                options,
+                default,
+            });
+        }
+    }
+
+    Ok(PlanDraft {
+        plan_markdown,
+        questions,
+        answers: HashMap::new(),
+    })
+}
+
+#[derive(Debug, Clone, Copy)]
+enum SettingsFocus {
+    Categories,
+    Items,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum SettingsCategory {
+    General,
+    Appearance,
+    Memory,
+    Sandbox,
+}
+
+impl SettingsCategory {
+    fn label(&self) -> &'static str {
+        match self {
+            SettingsCategory::General => "General",
+            SettingsCategory::Appearance => "Appearance",
+            SettingsCategory::Memory => "Memory",
+            SettingsCategory::Sandbox => "Sandbox",
+        }
+    }
+
+    fn items(&self) -> &'static [SettingsItem] {
+        match self {
+            SettingsCategory::General => &[
+                SettingsItem::Model,
+                SettingsItem::SplitRatio,
+                SettingsItem::AutoIndex,
+                SettingsItem::ResumeLastSession,
+            ],
+            SettingsCategory::Appearance => &[SettingsItem::ThemePreset],
+            SettingsCategory::Memory => &[
+                SettingsItem::MemoryEnabled,
+                SettingsItem::MemoryAutoInject,
+                SettingsItem::MemoryAutoLearnFailures,
+                SettingsItem::MemoryAutoLearnUser,
+                SettingsItem::MemoryAutoExtract,
+                SettingsItem::MemoryExtractionModel,
+            ],
+            SettingsCategory::Sandbox => &[
+                SettingsItem::SandboxEnabled,
+                SettingsItem::SandboxRoot,
+                SettingsItem::SandboxAllowPaths,
+                SettingsItem::SandboxDenyPaths,
+                SettingsItem::SandboxAllowCommands,
+                SettingsItem::SandboxAllowTools,
+            ],
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SettingsItem {
     Model,
+    ThemePreset,
     SplitRatio,
     AutoIndex,
     ResumeLastSession,
@@ -2104,6 +3296,7 @@ impl SettingsItem {
     fn label(&self) -> &'static str {
         match self {
             SettingsItem::Model => "Model",
+            SettingsItem::ThemePreset => "Theme",
             SettingsItem::SplitRatio => "Split ratio",
             SettingsItem::AutoIndex => "Auto index",
             SettingsItem::ResumeLastSession => "Resume last session",
@@ -2275,6 +3468,25 @@ fn summarize_tool_call(name: &str, args: &serde_json::Value) -> String {
                 trunc(&format!("{} in {}", q, path), 140)
             }
         }
+        "lsp" => {
+            let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("");
+            let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
+            let line = args.get("line").and_then(|v| v.as_u64());
+            let col = args.get("column").and_then(|v| v.as_u64());
+            let mut s = if let (Some(l), Some(c)) = (line, col) {
+                format!("{} {}:{}:{}", action, path, l, c)
+            } else {
+                format!("{} {}", action, path)
+            };
+            if action == "rename" {
+                if let Some(nn) = args.get("new_name").and_then(|v| v.as_str()) {
+                    if !nn.trim().is_empty() {
+                        s.push_str(&format!(" -> {}", nn.trim()));
+                    }
+                }
+            }
+            trunc(&s, 160)
+        }
         "memory_recall" => {
             let q = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
             trunc(&format!("recall: {}", q), 140)
@@ -2376,6 +3588,31 @@ fn sandbox_decision_for_tool(
                         return SandboxDecision::deny(e.to_string());
                     }
                 }
+            }
+            SandboxDecision::allow()
+        }
+        "lsp" => {
+            let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
+            if let Err(e) = policy.check_path_allowed(Path::new(path)) {
+                return SandboxDecision::deny(e.to_string());
+            }
+
+            let language = args
+                .get("language")
+                .and_then(|v| v.as_str())
+                .unwrap_or("auto");
+
+            let lang = match crate::lsp::LspLanguage::from_user(language, Path::new(path)) {
+                Some(l) => l,
+                None => {
+                    return SandboxDecision::deny(
+                        "Error: unsupported lsp language (use auto|rust|typescript).".to_string(),
+                    )
+                }
+            };
+            let exe = lang.resolve_executable(&policy.root);
+            if let Err(e) = policy.check_command_allowed(exe.to_string_lossy().as_ref()) {
+                return SandboxDecision::deny(e.to_string());
             }
             SandboxDecision::allow()
         }
@@ -2515,6 +3752,7 @@ fn load_existing_index_status() -> IndexingStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     #[test]
     fn tool_runs_are_linked_by_call_id() {
@@ -2563,6 +3801,76 @@ mod tests {
             assert_eq!(app.tool_outputs.len(), 2);
             assert!(app.tool_outputs[0].output.contains('A'));
             assert!(app.tool_outputs[1].output.is_empty());
+        });
+    }
+
+    #[test]
+    fn tab_toggles_plan_mode_backtab_switches_pane() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let tmp = std::env::temp_dir()
+                .join(format!("lorikeet-test-{}", crate::memory::types::unix_ts()));
+            let _ = std::fs::create_dir_all(&tmp);
+
+            let (tx, _rx) = mpsc::unbounded_channel::<AppEvent>();
+            let config = AppConfig::default();
+            let policy = Arc::new(SandboxPolicy::from_config(
+                config.clone(),
+                tmp.clone(),
+                crate::tools::TOOL_NAMES,
+            ));
+            let memory = Arc::new(MemoryManager::init(&tmp).await.unwrap());
+            let mut app = App::new(tx, "k".into(), policy, config, tmp, memory);
+
+            assert!(!app.plan_mode);
+            app.handle_event(AppEvent::Input(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)));
+            assert!(app.plan_mode);
+            app.handle_event(AppEvent::Input(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)));
+            assert!(!app.plan_mode);
+
+            assert_eq!(app.active_pane, Pane::Chat);
+            app.handle_event(AppEvent::Input(KeyEvent::new(
+                KeyCode::BackTab,
+                KeyModifiers::SHIFT,
+            )));
+            assert_eq!(app.active_pane, Pane::Context);
+            app.handle_event(AppEvent::Input(KeyEvent::new(
+                KeyCode::BackTab,
+                KeyModifiers::SHIFT,
+            )));
+            assert_eq!(app.active_pane, Pane::Chat);
+        });
+    }
+
+    #[test]
+    fn go_sets_tools_override_and_ephemeral_message_then_consumes() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let tmp = std::env::temp_dir()
+                .join(format!("lorikeet-test-{}", crate::memory::types::unix_ts()));
+            let _ = std::fs::create_dir_all(&tmp);
+
+            let (tx, _rx) = mpsc::unbounded_channel::<AppEvent>();
+            let config = AppConfig::default();
+            let policy = Arc::new(SandboxPolicy::from_config(
+                config.clone(),
+                tmp.clone(),
+                crate::tools::TOOL_NAMES,
+            ));
+            let memory = Arc::new(MemoryManager::init(&tmp).await.unwrap());
+            let mut app = App::new(tx, "k".into(), policy, config, tmp, memory);
+
+            app.plan_mode = true;
+            app.prepare_go();
+            assert!(app.tools_enabled_for_next_call());
+
+            let (tools_enabled, ephemeral) = app.take_next_call_overrides();
+            assert!(tools_enabled);
+            assert!(ephemeral.is_some());
+
+            // One-shot override resets.
+            assert!(!app.tools_override_next);
+            assert!(app.ephemeral_user_message.is_none());
         });
     }
 }

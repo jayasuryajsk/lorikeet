@@ -164,6 +164,27 @@ fn get_tools() -> Vec<Tool> {
         Tool {
             tool_type: "function".into(),
             function: FunctionDef {
+                name: "lsp".into(),
+                description: "Language Server Protocol bridge for code-aware operations. Actions: definition, references, rename, diagnostics. Provide path + 1-based line/column for symbol operations.".into(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "language": {"type": "string", "description": "auto|rust|typescript (default auto)"},
+                        "action": {"type": "string", "description": "definition|references|rename|diagnostics"},
+                        "path": {"type": "string", "description": "File path (workspace-relative or absolute)"},
+                        "line": {"type": "integer", "description": "1-based line number (required for definition/references/rename)"},
+                        "column": {"type": "integer", "description": "1-based column number (required for definition/references/rename)"},
+                        "new_name": {"type": "string", "description": "New symbol name (required for rename)"},
+                        "include_declaration": {"type": "boolean", "description": "For references: include the declaration (default false)"},
+                        "limit": {"type": "integer", "description": "Max results (default 20)"}
+                    },
+                    "required": ["action","path"]
+                }),
+            },
+        },
+        Tool {
+            tool_type: "function".into(),
+            function: FunctionDef {
                 name: "read_file".into(),
                 description: "Read the contents of a file at the given path.".into(),
                 parameters: serde_json::json!({
@@ -378,6 +399,7 @@ pub async fn call_llm(
     api_key: String,
     model: String,
     messages: Vec<ChatMessage>,
+    tools_enabled: bool,
 ) {
     let client = reqwest::Client::new();
 
@@ -385,7 +407,7 @@ pub async fn call_llm(
         model,
         messages,
         stream: true,
-        tools: Some(get_tools()),
+        tools: if tools_enabled { Some(get_tools()) } else { None },
     };
 
     let response = client
@@ -489,6 +511,13 @@ pub async fn call_llm(
 
     // Check if we have tool calls to execute
     if finish_reason.as_deref() == Some("tool_calls") && !pending_tool_calls.is_empty() {
+        if !tools_enabled {
+            let _ = tx.send(AppEvent::AgentError(
+                "Plan mode: tool calls requested but tools are disabled".to_string(),
+            ));
+            let _ = tx.send(AppEvent::AgentDone);
+            return;
+        }
         let tool_calls: Vec<ToolCallMessage> = pending_tool_calls
             .into_iter()
             .filter(|tc| !tc.id.is_empty())
@@ -509,6 +538,32 @@ pub async fn call_llm(
     }
 
     let _ = tx.send(AppEvent::AgentDone);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn llm_request_tools_disabled_in_plan_mode() {
+        let req = ChatRequest {
+            model: "m".into(),
+            messages: vec![ChatMessage {
+                role: "user".into(),
+                content: Some("hi".into()),
+                tool_calls: None,
+                tool_call_id: None,
+                name: None,
+            }],
+            stream: true,
+            tools: None,
+        };
+        let v = serde_json::to_value(&req).unwrap();
+        assert!(
+            v.get("tools").is_none(),
+            "expected tools to be omitted when None"
+        );
+    }
 }
 
 #[derive(Debug, Deserialize)]

@@ -1,5 +1,6 @@
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -17,6 +18,14 @@ pub enum SessionEvent {
         reasoning: Option<String>,
         #[serde(default)]
         tool_group_id: Option<u64>,
+        #[serde(default)]
+        local: bool,
+    },
+    Checkpoint {
+        ts: i64,
+        id: String,
+        #[serde(default)]
+        name: Option<String>,
     },
     Tool {
         ts: i64,
@@ -123,6 +132,15 @@ impl SessionStore {
             content: msg.content.clone(),
             reasoning: msg.reasoning.clone(),
             tool_group_id: msg.tool_group_id,
+            local: msg.local,
+        });
+    }
+
+    pub fn record_checkpoint(&self, id: &str, name: Option<&str>) {
+        self.append(&SessionEvent::Checkpoint {
+            ts: unix_ts(),
+            id: id.to_string(),
+            name: name.map(|s| s.to_string()),
         });
     }
 
@@ -158,6 +176,38 @@ impl SessionStore {
         }
         Ok(out)
     }
+
+    pub fn count_events_lines(&self) -> std::io::Result<usize> {
+        let f = std::fs::File::open(&self.events_path)?;
+        let r = std::io::BufReader::new(f);
+        Ok(r.lines().count())
+    }
+
+    pub fn truncate_to_lines(&self, keep_lines: usize) -> std::io::Result<()> {
+        let src = std::fs::File::open(&self.events_path)?;
+        let mut r = std::io::BufReader::new(src);
+
+        let tmp = self
+            .events_path
+            .with_extension(format!("{}.tmp", self.session_id));
+        let mut w = std::fs::File::create(&tmp)?;
+
+        let mut line = String::new();
+        for _ in 0..keep_lines {
+            line.clear();
+            let n = r.read_line(&mut line)?;
+            if n == 0 {
+                break;
+            }
+            w.write_all(line.as_bytes())?;
+        }
+        w.flush()?;
+        drop(w);
+
+        std::fs::rename(&tmp, &self.events_path)?;
+        self.set_latest();
+        Ok(())
+    }
 }
 
 pub fn replay_into(
@@ -173,6 +223,7 @@ pub fn replay_into(
                 content,
                 reasoning,
                 tool_group_id,
+                local,
                 ..
             } => {
                 if role.eq_ignore_ascii_case("user") {
@@ -184,7 +235,11 @@ pub fn replay_into(
                     reasoning: reasoning.clone(),
                     tool_calls: None,
                     tool_group_id: *tool_group_id,
+                    local: *local,
                 });
+            }
+            SessionEvent::Checkpoint { .. } => {
+                // Session replay uses message/tool events only.
             }
             SessionEvent::Tool {
                 tool,
@@ -247,6 +302,7 @@ mod tests {
                 content: "hi".into(),
                 reasoning: None,
                 tool_group_id: None,
+                local: false,
             },
             SessionEvent::Message {
                 ts: 0,
@@ -254,6 +310,7 @@ mod tests {
                 content: "ok".into(),
                 reasoning: None,
                 tool_group_id: None,
+                local: false,
             },
             SessionEvent::Tool {
                 ts: 0,
@@ -275,6 +332,7 @@ mod tests {
                 content: "next".into(),
                 reasoning: None,
                 tool_group_id: None,
+                local: false,
             },
             SessionEvent::Tool {
                 ts: 0,
@@ -310,6 +368,7 @@ mod tests {
                 content: "hi".into(),
                 reasoning: None,
                 tool_group_id: None,
+                local: false,
             },
             SessionEvent::Tool {
                 ts: 0,

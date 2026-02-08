@@ -9,6 +9,10 @@ use tokio::process::Command;
 use tokio::sync::mpsc;
 
 use crate::events::AppEvent;
+use crate::lsp::{
+    format_locations_with_snippets, lsp_definition, lsp_diagnostics, lsp_references, lsp_rename,
+    LspLanguage,
+};
 use crate::sandbox::SandboxPolicy;
 use crate::semantic_search::{format_search_results, SearchConfig, SemanticSearch};
 
@@ -16,6 +20,7 @@ pub const TOOL_NAMES: &[&str] = &[
     "bash",
     "rg",
     "smart_search",
+    "lsp",
     "read_file",
     "write_file",
     "list_files",
@@ -272,6 +277,128 @@ pub async fn execute_tool(
                 success,
             }));
             result
+        }
+        "lsp" => {
+            let fail = |msg: String| {
+                let _ = tx.send(AppEvent::ToolOutput(crate::events::ToolOutputEvent {
+                    call_id: call_id.to_string(),
+                    chunk: msg.clone(),
+                }));
+                let _ = tx.send(AppEvent::ToolComplete(crate::events::ToolCompleteEvent {
+                    call_id: call_id.to_string(),
+                    success: false,
+                }));
+                msg
+            };
+
+            let action = string_arg(&args, "action");
+            let path = string_arg(&args, "path");
+            let language = string_arg(&args, "language");
+            let include_declaration = args
+                .get("include_declaration")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(20) as usize;
+
+            let path = Path::new(path.trim());
+            let lang = match LspLanguage::from_user(&language, path) {
+                Some(l) => l,
+                None => {
+                    return fail(
+                        "Error: unsupported lsp language. Use language=auto|rust|typescript."
+                            .to_string(),
+                    );
+                }
+            };
+
+            let action = action.trim().to_lowercase();
+            match action.as_str() {
+                "definition" => {
+                    let line = args.get("line").and_then(|v| v.as_u64()).unwrap_or(1) as usize;
+                    let col = args.get("column").and_then(|v| v.as_u64()).unwrap_or(1) as usize;
+                    let locs = match lsp_definition(policy, lang, path, line, col).await {
+                        Ok(v) => v,
+                        Err(e) => return fail(e),
+                    };
+                    let result = format_locations_with_snippets(policy, &locs, limit).await;
+                    let success = !result.starts_with("Error:");
+                    let _ = tx.send(AppEvent::ToolOutput(crate::events::ToolOutputEvent {
+                        call_id: call_id.to_string(),
+                        chunk: result.clone(),
+                    }));
+                    let _ = tx.send(AppEvent::ToolComplete(crate::events::ToolCompleteEvent {
+                        call_id: call_id.to_string(),
+                        success,
+                    }));
+                    result
+                }
+                "references" => {
+                    let line = args.get("line").and_then(|v| v.as_u64()).unwrap_or(1) as usize;
+                    let col = args.get("column").and_then(|v| v.as_u64()).unwrap_or(1) as usize;
+                    let locs =
+                        match lsp_references(policy, lang, path, line, col, include_declaration)
+                            .await
+                        {
+                            Ok(v) => v,
+                            Err(e) => return fail(e),
+                        };
+                    let result = format_locations_with_snippets(policy, &locs, limit).await;
+                    let success = !result.starts_with("Error:");
+                    let _ = tx.send(AppEvent::ToolOutput(crate::events::ToolOutputEvent {
+                        call_id: call_id.to_string(),
+                        chunk: result.clone(),
+                    }));
+                    let _ = tx.send(AppEvent::ToolComplete(crate::events::ToolCompleteEvent {
+                        call_id: call_id.to_string(),
+                        success,
+                    }));
+                    result
+                }
+                "rename" => {
+                    let line = args.get("line").and_then(|v| v.as_u64()).unwrap_or(1) as usize;
+                    let col = args.get("column").and_then(|v| v.as_u64()).unwrap_or(1) as usize;
+                    let new_name = string_arg(&args, "new_name");
+                    if new_name.trim().is_empty() {
+                        return fail("Error: missing new_name".to_string());
+                    }
+                    let edit = match lsp_rename(policy, lang, path, line, col, &new_name).await {
+                        Ok(v) => v,
+                        Err(e) => return fail(e),
+                    };
+                    let result =
+                        serde_json::to_string_pretty(&edit).unwrap_or_else(|_| edit.to_string());
+                    let _ = tx.send(AppEvent::ToolOutput(crate::events::ToolOutputEvent {
+                        call_id: call_id.to_string(),
+                        chunk: result.clone(),
+                    }));
+                    let _ = tx.send(AppEvent::ToolComplete(crate::events::ToolCompleteEvent {
+                        call_id: call_id.to_string(),
+                        success: true,
+                    }));
+                    result
+                }
+                "diagnostics" => {
+                    let diag = match lsp_diagnostics(policy, lang, path).await {
+                        Ok(v) => v,
+                        Err(e) => return fail(e),
+                    };
+                    let result =
+                        serde_json::to_string_pretty(&diag).unwrap_or_else(|_| diag.to_string());
+                    let _ = tx.send(AppEvent::ToolOutput(crate::events::ToolOutputEvent {
+                        call_id: call_id.to_string(),
+                        chunk: result.clone(),
+                    }));
+                    let _ = tx.send(AppEvent::ToolComplete(crate::events::ToolCompleteEvent {
+                        call_id: call_id.to_string(),
+                        success: true,
+                    }));
+                    result
+                }
+                _ => fail(
+                    "Error: invalid lsp action. Use definition|references|rename|diagnostics."
+                        .to_string(),
+                ),
+            }
         }
         "read_file" => {
             let path = string_arg(&args, "path");

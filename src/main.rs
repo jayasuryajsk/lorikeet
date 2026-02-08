@@ -14,8 +14,10 @@ use tokio::sync::mpsc;
 
 mod app;
 mod config;
+mod checkpoints;
 mod events;
 mod llm;
+mod lsp;
 mod markdown;
 mod memory;
 mod sandbox;

@@ -1,74 +1,7 @@
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use ratatui::prelude::*;
 
-#[derive(Clone, Copy)]
-pub struct Theme {
-    pub text: Color,
-    pub bold: Color,
-    pub italic: Color,
-    pub code: Color,
-    pub code_bg: Color,
-    pub heading: Color,
-    pub heading2: Color,
-    pub heading3: Color,
-    pub list_marker: Color,
-    pub link: Color,
-    pub blockquote: Color,
-    pub blockquote_bar: Color,
-    pub hr: Color,
-    pub table_border: Color,
-    pub table_header: Color,
-    pub strikethrough: Color,
-    pub checkbox: Color,
-}
-
-impl Theme {
-    pub fn agent() -> Self {
-        Self {
-            // Use terminal default so this works on both dark and light terminal themes.
-            text: Color::Reset,
-            bold: Color::Rgb(217, 119, 87),
-            italic: Color::DarkGray,
-            code: Color::Blue,
-            // Avoid hard-coded dark backgrounds (looks awful on light terminals).
-            code_bg: Color::Reset,
-            heading: Color::Rgb(217, 119, 87),
-            heading2: Color::Rgb(191, 103, 74),
-            heading3: Color::DarkGray,
-            list_marker: Color::Rgb(140, 80, 60),
-            link: Color::Rgb(217, 119, 87),
-            blockquote: Color::DarkGray,
-            blockquote_bar: Color::Rgb(140, 80, 60),
-            hr: Color::Rgb(100, 60, 45),
-            table_border: Color::Rgb(100, 60, 45),
-            table_header: Color::Rgb(217, 119, 87),
-            strikethrough: Color::DarkGray,
-            checkbox: Color::Rgb(217, 119, 87),
-        }
-    }
-
-    pub fn user() -> Self {
-        Self {
-            text: Color::Cyan,
-            bold: Color::LightCyan,
-            italic: Color::Cyan,
-            code: Color::Blue,
-            code_bg: Color::Reset,
-            heading: Color::LightCyan,
-            heading2: Color::Cyan,
-            heading3: Color::DarkGray,
-            list_marker: Color::DarkGray,
-            link: Color::Blue,
-            blockquote: Color::DarkGray,
-            blockquote_bar: Color::Rgb(80, 80, 80),
-            hr: Color::DarkGray,
-            table_border: Color::DarkGray,
-            table_header: Color::LightCyan,
-            strikethrough: Color::DarkGray,
-            checkbox: Color::Yellow,
-        }
-    }
-}
+use crate::theme::{MarkdownTheme, SyntaxTheme};
 
 #[derive(Default, Clone, Copy)]
 struct StyleState {
@@ -79,7 +12,7 @@ struct StyleState {
     link: bool,
 }
 
-fn style_for_state(theme: Theme, state: StyleState) -> Style {
+fn style_for_state(theme: MarkdownTheme, state: StyleState) -> Style {
     let mut style = Style::default().fg(theme.text);
 
     if state.code {
@@ -112,7 +45,7 @@ fn style_for_state(theme: Theme, state: StyleState) -> Style {
 }
 
 // Syntax highlighting colors for code blocks
-fn syntax_color(token: &str, lang: &str) -> Color {
+fn syntax_color(token: &str, lang: &str, syn: SyntaxTheme) -> Color {
     let keywords = [
         "fn", "let", "mut", "const", "if", "else", "match", "for", "while", "loop", "return",
         "break", "continue", "struct", "enum", "impl", "trait", "pub", "use", "mod", "async",
@@ -127,22 +60,22 @@ fn syntax_color(token: &str, lang: &str) -> Color {
         "str", "Vec", "Option", "Result", "Box", "Rc", "Arc", "HashMap", "HashSet",
     ];
 
-    if keywords.contains(&token) {
-        Color::Magenta
+    if token.starts_with("//") || (token.starts_with('#') && lang != "markdown") {
+        syn.comment
+    } else if keywords.contains(&token) {
+        syn.keyword
     } else if types.contains(&token) {
-        Color::Cyan
+        syn.ty
     } else if token.starts_with('"') || token.starts_with('\'') || token.starts_with('`') {
-        Color::Green
+        syn.string
     } else if token.chars().all(|c| c.is_ascii_digit() || c == '.') && !token.is_empty() {
-        Color::LightYellow
-    } else if token.starts_with("//") || token.starts_with('#') && lang != "markdown" {
-        Color::DarkGray
+        syn.number
     } else {
-        Color::Yellow
+        syn.ident
     }
 }
 
-fn highlight_code(code: &str, lang: &str, theme: Theme) -> Vec<Span<'static>> {
+fn highlight_code(code: &str, lang: &str, theme: MarkdownTheme, syn: SyntaxTheme) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
     let mut current = String::new();
     let mut in_string = false;
@@ -157,7 +90,7 @@ fn highlight_code(code: &str, lang: &str, theme: Theme) -> Vec<Span<'static>> {
 
         if !in_string && (c == '"' || c == '\'' || c == '`') {
             if !current.is_empty() {
-                let color = syntax_color(&current, lang);
+                let color = syntax_color(&current, lang, syn);
                 spans.push(Span::styled(
                     std::mem::take(&mut current),
                     Style::default().fg(color).bg(theme.code_bg),
@@ -182,7 +115,7 @@ fn highlight_code(code: &str, lang: &str, theme: Theme) -> Vec<Span<'static>> {
             current.push(c);
         } else {
             if !current.is_empty() {
-                let color = syntax_color(&current, lang);
+                let color = syntax_color(&current, lang, syn);
                 spans.push(Span::styled(
                     std::mem::take(&mut current),
                     Style::default().fg(color).bg(theme.code_bg),
@@ -190,18 +123,19 @@ fn highlight_code(code: &str, lang: &str, theme: Theme) -> Vec<Span<'static>> {
             }
             spans.push(Span::styled(
                 c.to_string(),
-                Style::default().fg(Color::White).bg(theme.code_bg),
+                // Avoid hard-coded white, which becomes unreadable on light terminals.
+                Style::default().fg(syn.punct).bg(theme.code_bg),
             ));
         }
     }
 
     if !current.is_empty() {
         let color = if in_comment {
-            Color::DarkGray
+            syn.comment
         } else if in_string {
-            Color::Green
+            syn.string
         } else {
-            syntax_color(&current, lang)
+            syntax_color(&current, lang, syn)
         };
         spans.push(Span::styled(
             current,
@@ -212,14 +146,14 @@ fn highlight_code(code: &str, lang: &str, theme: Theme) -> Vec<Span<'static>> {
     if spans.is_empty() {
         spans.push(Span::styled(
             code.to_string(),
-            Style::default().fg(Color::Yellow).bg(theme.code_bg),
+            Style::default().fg(syn.ident).bg(theme.code_bg),
         ));
     }
 
     spans
 }
 
-pub fn render(text: &str, theme: Theme, width: usize) -> Vec<Line<'static>> {
+pub fn render(text: &str, theme: MarkdownTheme, syn: SyntaxTheme, width: usize) -> Vec<Line<'static>> {
     let mut lines: Vec<Line<'static>> = Vec::new();
 
     let mut options = Options::empty();
@@ -261,7 +195,7 @@ pub fn render(text: &str, theme: Theme, width: usize) -> Vec<Line<'static>> {
     let flush_paragraph = |segments: &mut Vec<Vec<Span<'static>>>,
                            out: &mut Vec<Line<'static>>,
                            heading: Option<HeadingLevel>,
-                           theme: Theme,
+                           theme: MarkdownTheme,
                            width: usize,
                            in_blockquote: bool| {
         let total = segments.len();
@@ -299,7 +233,7 @@ pub fn render(text: &str, theme: Theme, width: usize) -> Vec<Line<'static>> {
     let flush_list_item = |segments: &mut Vec<Vec<Span<'static>>>,
                            out: &mut Vec<Line<'static>>,
                            list_stack: &mut Vec<(bool, usize)>,
-                           theme: Theme,
+                           theme: MarkdownTheme,
                            width: usize,
                            in_blockquote: bool| {
         if list_stack.is_empty() {
@@ -440,7 +374,7 @@ pub fn render(text: &str, theme: Theme, width: usize) -> Vec<Line<'static>> {
                     for code_line in &code_block_content {
                         let mut spans =
                             vec![Span::styled("  ", Style::default().bg(theme.code_bg))];
-                        spans.extend(highlight_code(code_line, &code_lang, theme));
+                        spans.extend(highlight_code(code_line, &code_lang, theme, syn));
                         let current_len: usize =
                             spans.iter().map(|s| s.content.chars().count()).sum();
                         if current_len < width.saturating_sub(2) {
@@ -533,7 +467,7 @@ pub fn render(text: &str, theme: Theme, width: usize) -> Vec<Line<'static>> {
     lines
 }
 
-fn style_heading_line(line: Line<'static>, level: HeadingLevel, theme: Theme) -> Line<'static> {
+fn style_heading_line(line: Line<'static>, level: HeadingLevel, theme: MarkdownTheme) -> Line<'static> {
     let style = match level {
         HeadingLevel::H1 => Style::default().fg(theme.heading).bold().underlined(),
         HeadingLevel::H2 => Style::default().fg(theme.heading).bold().underlined(),
@@ -551,7 +485,7 @@ fn style_heading_line(line: Line<'static>, level: HeadingLevel, theme: Theme) ->
     Line::from(spans)
 }
 
-fn style_blockquote_line(mut line: Line<'static>, theme: Theme) -> Line<'static> {
+fn style_blockquote_line(mut line: Line<'static>, theme: MarkdownTheme) -> Line<'static> {
     let mut spans = vec![Span::styled(
         "┃ ",
         Style::default().fg(theme.blockquote_bar),
@@ -564,7 +498,12 @@ fn style_blockquote_line(mut line: Line<'static>, theme: Theme) -> Line<'static>
     line
 }
 
-fn render_table(rows: &[Vec<String>], theme: Theme, width: usize, lines: &mut Vec<Line<'static>>) {
+fn render_table(
+    rows: &[Vec<String>],
+    theme: MarkdownTheme,
+    width: usize,
+    lines: &mut Vec<Line<'static>>,
+) {
     if rows.is_empty() {
         return;
     }
@@ -664,7 +603,7 @@ fn render_table(rows: &[Vec<String>], theme: Theme, width: usize, lines: &mut Ve
 fn wrap_spans(
     spans: Vec<Span<'static>>,
     prefix: Option<&str>,
-    theme: Theme,
+    theme: MarkdownTheme,
     width: usize,
 ) -> Vec<Line<'static>> {
     if width == 0 {
@@ -713,4 +652,60 @@ fn wrap_spans(
     }
 
     lines
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn markdown_render_respects_heading_color() {
+        let md = MarkdownTheme {
+            text: Color::Reset,
+            bold: Color::Blue,
+            italic: Color::DarkGray,
+            code: Color::Green,
+            code_bg: Color::Reset,
+            heading: Color::Red,
+            heading2: Color::Yellow,
+            heading3: Color::Magenta,
+            list_marker: Color::Cyan,
+            link: Color::Blue,
+            blockquote: Color::DarkGray,
+            blockquote_bar: Color::DarkGray,
+            hr: Color::DarkGray,
+            table_border: Color::DarkGray,
+            table_header: Color::Red,
+            strikethrough: Color::DarkGray,
+            checkbox: Color::Green,
+        };
+        let syn = SyntaxTheme {
+            keyword: Color::Magenta,
+            ty: Color::Cyan,
+            string: Color::Green,
+            number: Color::Yellow,
+            comment: Color::DarkGray,
+            punct: Color::Reset,
+            ident: Color::Reset,
+        };
+
+        let lines = render("# Title", md, syn, 80);
+        // First non-empty line should be the heading.
+        let first = lines.iter().find(|l| {
+            l.spans
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect::<String>()
+                .trim()
+                .len()
+                > 0
+        });
+        let Some(first) = first else {
+            panic!("no lines rendered");
+        };
+        assert!(
+            first.spans.iter().any(|s| s.style.fg == Some(Color::Red)),
+            "expected heading fg Color::Red"
+        );
+    }
 }

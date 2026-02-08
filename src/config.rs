@@ -32,6 +32,7 @@ pub struct SandboxConfig {
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct ThemeConfig {
+    pub preset: Option<String>,
     pub file_categories: Option<HashMap<String, String>>,
     pub file_extensions: Option<HashMap<String, String>>,
 }
