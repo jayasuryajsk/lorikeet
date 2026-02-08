@@ -75,7 +75,12 @@ fn syntax_color(token: &str, lang: &str, syn: SyntaxTheme) -> Color {
     }
 }
 
-fn highlight_code(code: &str, lang: &str, theme: MarkdownTheme, syn: SyntaxTheme) -> Vec<Span<'static>> {
+fn highlight_code(
+    code: &str,
+    lang: &str,
+    theme: MarkdownTheme,
+    syn: SyntaxTheme,
+) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
     let mut current = String::new();
     let mut in_string = false;
@@ -153,7 +158,12 @@ fn highlight_code(code: &str, lang: &str, theme: MarkdownTheme, syn: SyntaxTheme
     spans
 }
 
-pub fn render(text: &str, theme: MarkdownTheme, syn: SyntaxTheme, width: usize) -> Vec<Line<'static>> {
+pub fn render(
+    text: &str,
+    theme: MarkdownTheme,
+    syn: SyntaxTheme,
+    width: usize,
+) -> Vec<Line<'static>> {
     let mut lines: Vec<Line<'static>> = Vec::new();
 
     let mut options = Options::empty();
@@ -467,7 +477,11 @@ pub fn render(text: &str, theme: MarkdownTheme, syn: SyntaxTheme, width: usize) 
     lines
 }
 
-fn style_heading_line(line: Line<'static>, level: HeadingLevel, theme: MarkdownTheme) -> Line<'static> {
+fn style_heading_line(
+    line: Line<'static>,
+    level: HeadingLevel,
+    theme: MarkdownTheme,
+) -> Line<'static> {
     let style = match level {
         HeadingLevel::H1 => Style::default().fg(theme.heading).bold().underlined(),
         HeadingLevel::H2 => Style::default().fg(theme.heading).bold().underlined(),

@@ -13,8 +13,8 @@ use ratatui::Terminal;
 use tokio::sync::mpsc;
 
 mod app;
-mod config;
 mod checkpoints;
+mod config;
 mod events;
 mod llm;
 mod lsp;

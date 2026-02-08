@@ -573,7 +573,10 @@ fn parse_ui_palette(
     defs: &serde_json::Map<String, serde_json::Value>,
 ) -> Option<UiPalette> {
     let ui = ui?;
-    let get = |k: &str| ui.get(k).and_then(|v| resolve_color(v, defs, &mut HashSet::new(), 0));
+    let get = |k: &str| {
+        ui.get(k)
+            .and_then(|v| resolve_color(v, defs, &mut HashSet::new(), 0))
+    };
 
     Some(UiPalette {
         fg: get("fg").unwrap_or(Color::Reset),
@@ -593,7 +596,10 @@ fn parse_markdown_theme(
     base: MarkdownTheme,
 ) -> Option<MarkdownTheme> {
     let md = md.as_object()?;
-    let get = |k: &str| md.get(k).and_then(|v| resolve_color(v, defs, &mut HashSet::new(), 0));
+    let get = |k: &str| {
+        md.get(k)
+            .and_then(|v| resolve_color(v, defs, &mut HashSet::new(), 0))
+    };
     Some(MarkdownTheme {
         text: get("text").unwrap_or(base.text),
         bold: get("bold").unwrap_or(base.bold),
@@ -621,7 +627,10 @@ fn parse_syntax_theme(
     base: SyntaxTheme,
 ) -> Option<SyntaxTheme> {
     let syn = syn.as_object()?;
-    let get = |k: &str| syn.get(k).and_then(|v| resolve_color(v, defs, &mut HashSet::new(), 0));
+    let get = |k: &str| {
+        syn.get(k)
+            .and_then(|v| resolve_color(v, defs, &mut HashSet::new(), 0))
+    };
     Some(SyntaxTheme {
         keyword: get("keyword").unwrap_or(base.keyword),
         ty: get("type").or_else(|| get("ty")).unwrap_or(base.ty),
@@ -639,7 +648,10 @@ fn parse_tool_trace_theme(
     base: ToolTraceTheme,
 ) -> Option<ToolTraceTheme> {
     let tt = tt.as_object()?;
-    let get = |k: &str| tt.get(k).and_then(|v| resolve_color(v, defs, &mut HashSet::new(), 0));
+    let get = |k: &str| {
+        tt.get(k)
+            .and_then(|v| resolve_color(v, defs, &mut HashSet::new(), 0))
+    };
     Some(ToolTraceTheme {
         title: get("title").unwrap_or(base.title),
         invocation: get("invocation").unwrap_or(base.invocation),
@@ -785,7 +797,11 @@ pub fn style_for_filename_with_theme(name: &str, config: &AppConfig, theme: &UiT
 
 fn style_from_extension(ext: &str, config: &AppConfig, theme: Option<&UiTheme>) -> Option<Style> {
     // Config overrides win.
-    if let Some(cfg) = config.theme.as_ref().and_then(|t| t.file_extensions.as_ref()) {
+    if let Some(cfg) = config
+        .theme
+        .as_ref()
+        .and_then(|t| t.file_extensions.as_ref())
+    {
         if let Some(value) = cfg.get(ext) {
             if let Some(style) = category_style(value, config, theme) {
                 return Some(style);

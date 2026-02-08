@@ -7,8 +7,8 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent,
 use ratatui::prelude::Rect;
 use tokio::sync::mpsc;
 
-use crate::config::AppConfig;
 use crate::checkpoints;
+use crate::config::AppConfig;
 use crate::events::AppEvent;
 use crate::llm::{call_llm, ChatMessage};
 use crate::memory::MemoryManager;
@@ -646,8 +646,9 @@ impl App {
 
                     self.session = Some(store);
                     self.refresh_verify_suggestions();
-                    self.last_checkpoint =
-                        checkpoints::list_checkpoints(&self.workspace_root, 1).ok().and_then(|v| v.into_iter().next());
+                    self.last_checkpoint = checkpoints::list_checkpoints(&self.workspace_root, 1)
+                        .ok()
+                        .and_then(|v| v.into_iter().next());
                     // User-visible notice.
                     self.messages.push(Message {
                         role: Role::Agent,
@@ -673,8 +674,9 @@ impl App {
         }
 
         self.refresh_verify_suggestions();
-        self.last_checkpoint =
-            checkpoints::list_checkpoints(&self.workspace_root, 1).ok().and_then(|v| v.into_iter().next());
+        self.last_checkpoint = checkpoints::list_checkpoints(&self.workspace_root, 1)
+            .ok()
+            .and_then(|v| v.into_iter().next());
 
         // Persist the current system/hello messages.
         if let Some(store) = &self.session {
@@ -770,7 +772,9 @@ impl App {
             // Otherwise, treat it as a prefix and run the currently selected suggestion.
             let suggestions = self.command_suggestions(&user_trimmed);
             if !suggestions.is_empty() {
-                let idx = self.command_suggest_selected.min(suggestions.len().saturating_sub(1));
+                let idx = self
+                    .command_suggest_selected
+                    .min(suggestions.len().saturating_sub(1));
                 let resolved = suggestions[idx].0.clone();
                 self.messages.push(Message {
                     role: Role::User,
@@ -1002,9 +1006,8 @@ impl App {
 
     fn prepare_go(&mut self) {
         self.tools_override_next = true;
-        self.ephemeral_user_message = Some(
-            "Execute the plan above. Start running tools now. Verify when reasonable.".into(),
-        );
+        self.ephemeral_user_message =
+            Some("Execute the plan above. Start running tools now. Verify when reasonable.".into());
     }
 
     fn prepare_go_with_plan(&mut self, plan: &PlanDraft) {
@@ -1127,7 +1130,8 @@ impl App {
             },
             KeyCode::Right => match self.plan_focus {
                 PlanFocus::Answer => {
-                    self.plan_answer_cursor = (self.plan_answer_cursor + 1).min(self.plan_answer_input.len());
+                    self.plan_answer_cursor =
+                        (self.plan_answer_cursor + 1).min(self.plan_answer_input.len());
                 }
                 PlanFocus::Buttons => {
                     self.plan_button_selected = (self.plan_button_selected + 1).min(1);
@@ -1243,7 +1247,11 @@ impl App {
         }
         let cur = self.plan_answer_input.clone();
         let idx = q.options.iter().position(|o| o == &cur).unwrap_or(0);
-        let prev = if idx == 0 { q.options.len() - 1 } else { idx - 1 };
+        let prev = if idx == 0 {
+            q.options.len() - 1
+        } else {
+            idx - 1
+        };
         self.plan_answer_input = q.options[prev].clone();
         self.plan_answer_cursor = self.plan_answer_input.len();
         self.save_plan_answer_input();
@@ -2027,10 +2035,7 @@ impl App {
                     self.last_checkpoint = Some(meta.clone());
                     self.messages.push(Message {
                         role: Role::Agent,
-                        content: format!(
-                            "Checkpoint created: {} ({:?})",
-                            meta.id, meta.backend
-                        ),
+                        content: format!("Checkpoint created: {} ({:?})", meta.id, meta.backend),
                         reasoning: None,
                         tool_calls: None,
                         tool_group_id: None,
@@ -2076,11 +2081,12 @@ impl App {
             out.push_str("Checkpoints:\n");
             for m in metas {
                 let nm = m.name.clone().unwrap_or_default();
-                let nm = if nm.is_empty() { "".to_string() } else { format!(" — {}", nm) };
-                out.push_str(&format!(
-                    "- {} ({:?}){}\n",
-                    m.id, m.backend, nm
-                ));
+                let nm = if nm.is_empty() {
+                    "".to_string()
+                } else {
+                    format!(" — {}", nm)
+                };
+                out.push_str(&format!("- {} ({:?}){}\n", m.id, m.backend, nm));
             }
             self.messages.push(Message {
                 role: Role::Agent,
@@ -3823,9 +3829,15 @@ mod tests {
             let mut app = App::new(tx, "k".into(), policy, config, tmp, memory);
 
             assert!(!app.plan_mode);
-            app.handle_event(AppEvent::Input(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)));
+            app.handle_event(AppEvent::Input(KeyEvent::new(
+                KeyCode::Tab,
+                KeyModifiers::NONE,
+            )));
             assert!(app.plan_mode);
-            app.handle_event(AppEvent::Input(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE)));
+            app.handle_event(AppEvent::Input(KeyEvent::new(
+                KeyCode::Tab,
+                KeyModifiers::NONE,
+            )));
             assert!(!app.plan_mode);
 
             assert_eq!(app.active_pane, Pane::Chat);

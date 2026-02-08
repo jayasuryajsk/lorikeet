@@ -407,7 +407,11 @@ pub async fn call_llm(
         model,
         messages,
         stream: true,
-        tools: if tools_enabled { Some(get_tools()) } else { None },
+        tools: if tools_enabled {
+            Some(get_tools())
+        } else {
+            None
+        },
     };
 
     let response = client

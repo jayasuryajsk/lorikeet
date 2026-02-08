@@ -96,8 +96,13 @@ pub fn create_checkpoint(
     session: &SessionStore,
     name: Option<String>,
 ) -> Result<CheckpointMeta> {
-    let workspace_root = fs::canonicalize(workspace_root).unwrap_or_else(|_| workspace_root.to_path_buf());
-    let backend = if is_git_worktree(&workspace_root) { CheckpointBackend::Git } else { CheckpointBackend::Snapshot };
+    let workspace_root =
+        fs::canonicalize(workspace_root).unwrap_or_else(|_| workspace_root.to_path_buf());
+    let backend = if is_git_worktree(&workspace_root) {
+        CheckpointBackend::Git
+    } else {
+        CheckpointBackend::Snapshot
+    };
 
     let id = new_checkpoint_id();
     let dir = checkpoint_dir(&workspace_root, &id)?;
@@ -113,7 +118,11 @@ pub fn create_checkpoint(
     let mut git_head: Option<String> = None;
     match backend {
         CheckpointBackend::Git => {
-            git_head = Some(run_git(&workspace_root, &["rev-parse", "HEAD"])?.trim().to_string());
+            git_head = Some(
+                run_git(&workspace_root, &["rev-parse", "HEAD"])?
+                    .trim()
+                    .to_string(),
+            );
             git_capture(&workspace_root, &dir)?;
         }
         CheckpointBackend::Snapshot => {
@@ -144,7 +153,8 @@ pub fn restore_checkpoint(
     session: &SessionStore,
     meta: &CheckpointMeta,
 ) -> Result<()> {
-    let workspace_root = fs::canonicalize(workspace_root).unwrap_or_else(|_| workspace_root.to_path_buf());
+    let workspace_root =
+        fs::canonicalize(workspace_root).unwrap_or_else(|_| workspace_root.to_path_buf());
     let canon_meta_root = fs::canonicalize(Path::new(&meta.workspace_root))
         .unwrap_or_else(|_| PathBuf::from(&meta.workspace_root));
     if workspace_root != canon_meta_root {
@@ -173,7 +183,8 @@ pub fn restore_checkpoint(
 }
 
 pub fn checkpoint_diff_summary(workspace_root: &Path, meta: &CheckpointMeta) -> Result<String> {
-    let workspace_root = fs::canonicalize(workspace_root).unwrap_or_else(|_| workspace_root.to_path_buf());
+    let workspace_root =
+        fs::canonicalize(workspace_root).unwrap_or_else(|_| workspace_root.to_path_buf());
     let dir = checkpoint_dir(&workspace_root, &meta.id)?;
     match meta.backend {
         CheckpointBackend::Git => {
@@ -184,9 +195,15 @@ pub fn checkpoint_diff_summary(workspace_root: &Path, meta: &CheckpointMeta) -> 
                 out.push_str(&format!("git head: {}\n", head));
             }
             out.push_str("staged:\n");
-            out.push_str(&git_patch_numstat(&workspace_root, &staged).unwrap_or_else(|_| "(unavailable)\n".to_string()));
+            out.push_str(
+                &git_patch_numstat(&workspace_root, &staged)
+                    .unwrap_or_else(|_| "(unavailable)\n".to_string()),
+            );
             out.push_str("unstaged:\n");
-            out.push_str(&git_patch_numstat(&workspace_root, &unstaged).unwrap_or_else(|_| "(unavailable)\n".to_string()));
+            out.push_str(
+                &git_patch_numstat(&workspace_root, &unstaged)
+                    .unwrap_or_else(|_| "(unavailable)\n".to_string()),
+            );
             Ok(out.trim_end().to_string())
         }
         CheckpointBackend::Snapshot => {
@@ -246,7 +263,10 @@ fn git_capture(workspace_root: &Path, dir: &Path) -> Result<()> {
     run_git_to_file(workspace_root, &["diff", "--binary", "--staged"], &staged)?;
     run_git_to_file(workspace_root, &["diff", "--binary"], &unstaged)?;
 
-    let untracked = run_git_bytes(workspace_root, &["ls-files", "--others", "--exclude-standard", "-z"])?;
+    let untracked = run_git_bytes(
+        workspace_root,
+        &["ls-files", "--others", "--exclude-standard", "-z"],
+    )?;
     let files = split_nul(&untracked);
 
     let mut entries = Vec::new();
@@ -255,7 +275,11 @@ fn git_capture(workspace_root: &Path, dir: &Path) -> Result<()> {
             continue;
         }
         let rel_path = Path::new(&rel);
-        if rel_path.is_absolute() || rel_path.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+        if rel_path.is_absolute()
+            || rel_path
+                .components()
+                .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
             continue;
         }
         let src = workspace_root.join(rel_path);
@@ -333,7 +357,11 @@ fn git_restore(workspace_root: &Path, dir: &Path, meta: &CheckpointMeta) -> Resu
         )?;
     }
     let unstaged = dir.join("unstaged.patch");
-    if unstaged.exists() && fs::metadata(&unstaged).map(|m| m.len() > 0).unwrap_or(false) {
+    if unstaged.exists()
+        && fs::metadata(&unstaged)
+            .map(|m| m.len() > 0)
+            .unwrap_or(false)
+    {
         run_git_status_ok(
             workspace_root,
             &["apply", "--binary", unstaged.to_string_lossy().as_ref()],
@@ -370,7 +398,10 @@ fn snapshot_capture(workspace_root: &Path, dir: &Path) -> Result<()> {
     }
 
     let manifest = Manifest { files: entries };
-    fs::write(dir.join("manifest.json"), serde_json::to_string_pretty(&manifest)?)?;
+    fs::write(
+        dir.join("manifest.json"),
+        serde_json::to_string_pretty(&manifest)?,
+    )?;
     Ok(())
 }
 
@@ -378,8 +409,8 @@ fn snapshot_restore(workspace_root: &Path, dir: &Path) -> Result<()> {
     let manifest_path = dir.join("manifest.json");
     let data = fs::read_to_string(&manifest_path)
         .with_context(|| format!("Failed to read {}", manifest_path.display()))?;
-    let manifest: Manifest =
-        serde_json::from_str(&data).with_context(|| format!("Failed to parse {}", manifest_path.display()))?;
+    let manifest: Manifest = serde_json::from_str(&data)
+        .with_context(|| format!("Failed to parse {}", manifest_path.display()))?;
     let expected: HashSet<String> = manifest.files.iter().map(|f| f.path.clone()).collect();
 
     // Delete files not in manifest, but only within included (non-excluded) set.
@@ -523,17 +554,24 @@ fn copy_tree(src_root: &Path, dst_root: &Path, workspace_root: Option<&Path>) ->
         }
         let src = ent.path();
         let rel = src.strip_prefix(src_root).unwrap_or(src);
-        if rel.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+        if rel
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
             continue;
         }
         let dst = dst_root.join(rel);
 
         if let Some(ws) = workspace_root {
             // Defensive: ensure destination is within workspace root.
-            let canon = fs::canonicalize(dst.parent().unwrap_or(dst_root)).unwrap_or_else(|_| dst.parent().unwrap_or(dst_root).to_path_buf());
+            let canon = fs::canonicalize(dst.parent().unwrap_or(dst_root))
+                .unwrap_or_else(|_| dst.parent().unwrap_or(dst_root).to_path_buf());
             let ws_canon = fs::canonicalize(ws).unwrap_or_else(|_| ws.to_path_buf());
             if !canon.starts_with(&ws_canon) {
-                return Err(anyhow!("Refusing to write outside workspace: {}", dst.display()));
+                return Err(anyhow!(
+                    "Refusing to write outside workspace: {}",
+                    dst.display()
+                ));
             }
         }
 
@@ -573,7 +611,14 @@ fn list_included_files(workspace_root: &Path) -> Result<Vec<String>> {
 
 fn is_excluded(rel: &Path) -> bool {
     // Exclude common heavy/build dirs and lorikeet internals.
-    let excluded = [".git", "target", "node_modules", "dist", "build", ".lorikeet"];
+    let excluded = [
+        ".git",
+        "target",
+        "node_modules",
+        "dist",
+        "build",
+        ".lorikeet",
+    ];
     rel.components().any(|c| {
         if let std::path::Component::Normal(s) = c {
             excluded.iter().any(|e| s == std::ffi::OsStr::new(e))
@@ -585,7 +630,8 @@ fn is_excluded(rel: &Path) -> bool {
 
 fn sha256_hex(path: &Path) -> Result<String> {
     use sha2::{Digest, Sha256};
-    let mut f = fs::File::open(path).with_context(|| format!("Failed to open {}", path.display()))?;
+    let mut f =
+        fs::File::open(path).with_context(|| format!("Failed to open {}", path.display()))?;
     let mut hasher = Sha256::new();
     let mut buf = [0u8; 64 * 1024];
     loop {
