@@ -2078,8 +2078,14 @@ impl App {
         } else {
             idx - 1
         };
-        self.settings_input = providers[new_idx].to_string();
+        let new = providers[new_idx].to_string();
+        self.settings_input = new.clone();
         self.settings_cursor = self.settings_input.len();
+
+        // Keep the draft in sync so dependent settings (e.g. Model suggestions) can react.
+        let mut general = self.settings_draft.general.clone().unwrap_or_default();
+        general.provider = Some(new);
+        self.settings_draft.general = Some(general);
     }
 
     fn settings_provider_name(&self) -> &str {
