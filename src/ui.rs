@@ -24,6 +24,16 @@ pub fn ui(frame: &mut Frame, app: &mut App) {
     let ui_theme = theme::ui_theme(&app.config, Some(app.workspace_root_path()));
     let pal = ui_theme.palette;
     app.root_area = frame.area();
+
+    // "Opacity" in TUIs is just background fill. If the theme has a non-reset bg,
+    // paint the whole frame so colors look rich and consistent.
+    if pal.bg != Color::Reset {
+        frame.render_widget(
+            Block::default().style(Style::default().bg(pal.bg).fg(pal.fg)),
+            frame.area(),
+        );
+    }
+
     let split_ratio = app.split_ratio.max(20).min(80);
 
     let main_chunks = Layout::default()
@@ -224,6 +234,9 @@ fn render_command_suggestions_overlay(
     };
 
     frame.render_widget(Clear, area);
+    if pal.bg != Color::Reset {
+        frame.render_widget(Block::default().style(Style::default().bg(pal.bg)), area);
+    }
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
@@ -291,6 +304,12 @@ fn render_settings_popup(frame: &mut Frame, app: &mut App) {
     let popup_area = centered_rect(74, 66, area);
 
     frame.render_widget(Clear, popup_area);
+    if pal.bg != Color::Reset {
+        frame.render_widget(
+            Block::default().style(Style::default().bg(pal.bg)),
+            popup_area,
+        );
+    }
 
     let block = Block::default()
         .borders(Borders::ALL)
@@ -526,6 +545,12 @@ fn render_themes_popup(frame: &mut Frame, app: &mut App) {
     let popup_area = centered_rect(72, 60, area);
 
     frame.render_widget(Clear, popup_area);
+    if pal.bg != Color::Reset {
+        frame.render_widget(
+            Block::default().style(Style::default().bg(pal.bg)),
+            popup_area,
+        );
+    }
 
     let block = Block::default()
         .borders(Borders::ALL)
@@ -681,6 +706,12 @@ fn render_plan_popup(frame: &mut Frame, app: &mut App, ui_theme: &theme::UiTheme
     };
 
     frame.render_widget(Clear, popup_area);
+    if pal.bg != Color::Reset {
+        frame.render_widget(
+            Block::default().style(Style::default().bg(pal.bg)),
+            popup_area,
+        );
+    }
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)

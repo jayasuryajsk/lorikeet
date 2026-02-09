@@ -228,7 +228,7 @@ fn builtin_palettes() -> HashMap<&'static str, UiPalette> {
             UiPalette {
                 fg: Color::Reset,
                 fg_dim: rgb("#6b7280"),
-                bg: Color::Reset,
+                bg: rgb("#0b1220"),
                 border: rgb("#4b5563"),
                 accent: rgb("#60a5fa"),
                 ok: rgb("#22c55e"),
@@ -241,7 +241,7 @@ fn builtin_palettes() -> HashMap<&'static str, UiPalette> {
             UiPalette {
                 fg: Color::Reset,
                 fg_dim: rgb("#565f89"),
-                bg: Color::Reset,
+                bg: rgb("#1a1b26"),
                 border: rgb("#414868"),
                 accent: rgb("#7aa2f7"),
                 ok: rgb("#9ece6a"),
@@ -254,7 +254,7 @@ fn builtin_palettes() -> HashMap<&'static str, UiPalette> {
             UiPalette {
                 fg: Color::Reset,
                 fg_dim: rgb("#859289"),
-                bg: Color::Reset,
+                bg: rgb("#2b3339"),
                 border: rgb("#4f585e"),
                 accent: rgb("#a7c080"),
                 ok: rgb("#a7c080"),
@@ -267,7 +267,7 @@ fn builtin_palettes() -> HashMap<&'static str, UiPalette> {
             UiPalette {
                 fg: Color::Reset,
                 fg_dim: rgb("#707a8c"),
-                bg: Color::Reset,
+                bg: rgb("#0f1419"),
                 border: rgb("#3d424d"),
                 accent: rgb("#39bae6"),
                 ok: rgb("#b8cc52"),
@@ -280,7 +280,7 @@ fn builtin_palettes() -> HashMap<&'static str, UiPalette> {
             UiPalette {
                 fg: Color::Reset,
                 fg_dim: rgb("#6c7086"),
-                bg: Color::Reset,
+                bg: rgb("#1e1e2e"),
                 border: rgb("#45475a"),
                 accent: rgb("#89b4fa"),
                 ok: rgb("#a6e3a1"),
@@ -293,7 +293,7 @@ fn builtin_palettes() -> HashMap<&'static str, UiPalette> {
             UiPalette {
                 fg: Color::Reset,
                 fg_dim: rgb("#928374"),
-                bg: Color::Reset,
+                bg: rgb("#282828"),
                 border: rgb("#665c54"),
                 accent: rgb("#83a598"),
                 ok: rgb("#b8bb26"),
@@ -306,7 +306,7 @@ fn builtin_palettes() -> HashMap<&'static str, UiPalette> {
             UiPalette {
                 fg: Color::Reset,
                 fg_dim: rgb("#727169"),
-                bg: Color::Reset,
+                bg: rgb("#1f1f28"),
                 border: rgb("#54546d"),
                 accent: rgb("#7e9cd8"),
                 ok: rgb("#98bb6c"),
@@ -319,7 +319,7 @@ fn builtin_palettes() -> HashMap<&'static str, UiPalette> {
             UiPalette {
                 fg: Color::Reset,
                 fg_dim: rgb("#616e88"),
-                bg: Color::Reset,
+                bg: rgb("#2e3440"),
                 border: rgb("#4c566a"),
                 accent: rgb("#88c0d0"),
                 ok: rgb("#a3be8c"),
@@ -332,7 +332,7 @@ fn builtin_palettes() -> HashMap<&'static str, UiPalette> {
             UiPalette {
                 fg: Color::Reset,
                 fg_dim: rgb("#00aa3f"),
-                bg: Color::Reset,
+                bg: rgb("#00110a"),
                 border: rgb("#007a2c"),
                 accent: rgb("#00ff5f"),
                 ok: rgb("#00ff5f"),
@@ -345,7 +345,7 @@ fn builtin_palettes() -> HashMap<&'static str, UiPalette> {
             UiPalette {
                 fg: Color::Reset,
                 fg_dim: rgb("#5c6370"),
-                bg: Color::Reset,
+                bg: rgb("#282c34"),
                 border: rgb("#4b5263"),
                 accent: rgb("#61afef"),
                 ok: rgb("#98c379"),
