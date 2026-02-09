@@ -356,6 +356,7 @@ pub struct App {
     event_tx: mpsc::UnboundedSender<AppEvent>,
     api_key: String,
     llm_provider: LlmProvider,
+    codex_account_id: Option<String>,
     pub model: String,
     sandbox_policy: Arc<SandboxPolicy>,
     pub memory: Arc<MemoryManager>,
@@ -441,6 +442,7 @@ impl App {
         event_tx: mpsc::UnboundedSender<AppEvent>,
         llm_provider: LlmProvider,
         api_key: String,
+        codex_account_id: Option<String>,
         sandbox_policy: Arc<SandboxPolicy>,
         config: AppConfig,
         workspace_root: PathBuf,
@@ -494,6 +496,7 @@ impl App {
             event_tx,
             api_key,
             llm_provider,
+            codex_account_id,
             model,
             sandbox_policy,
             memory,
@@ -931,6 +934,7 @@ impl App {
         let tx = self.event_tx.clone();
         let api_key = self.api_key.clone();
         let llm_provider = self.llm_provider;
+        let codex_account_id = self.codex_account_id.clone();
         let model = self.model.clone();
         let memory = self.memory.clone();
 
@@ -996,6 +1000,7 @@ impl App {
                 tx,
                 llm_provider,
                 api_key,
+                codex_account_id,
                 model,
                 chat_messages,
                 tools_enabled,
@@ -1909,6 +1914,7 @@ impl App {
                 if k.is_empty() {
                     return Err("OPENROUTER_API_KEY is empty".to_string());
                 }
+                self.codex_account_id = None;
                 (LlmProvider::OpenRouter, k)
             }
             "openai" => {
@@ -1919,25 +1925,27 @@ impl App {
                 if k.is_empty() {
                     return Err("OPENAI_API_KEY is empty".to_string());
                 }
+                self.codex_account_id = None;
                 (LlmProvider::OpenAI, k)
             }
             "codex" | "codex_oauth" => {
                 let token_res = match tokio::runtime::Handle::try_current() {
                     Ok(h) => tokio::task::block_in_place(|| {
-                        h.block_on(crate::codex_oauth::codex_chatgpt_access_token())
+                        h.block_on(crate::codex_oauth::codex_chatgpt_auth())
                     }),
                     Err(_) => {
                         let rt = tokio::runtime::Runtime::new().map_err(|e| {
                             format!("Failed to create runtime for Codex OAuth: {e}")
                         })?;
-                        rt.block_on(crate::codex_oauth::codex_chatgpt_access_token())
+                        rt.block_on(crate::codex_oauth::codex_chatgpt_auth())
                     }
                 };
-                let token = token_res?;
-                if token.trim().is_empty() {
+                let auth = token_res?;
+                if auth.access_token.trim().is_empty() {
                     return Err("Codex OAuth returned an empty access token".to_string());
                 }
-                (LlmProvider::Codex, token)
+                self.codex_account_id = auth.account_id.clone();
+                (LlmProvider::Codex, auth.access_token)
             }
             _ => {
                 return Err("Unknown provider. Use: openrouter | openai | codex".to_string());
@@ -3999,6 +4007,7 @@ mod tests {
                 tx,
                 LlmProvider::OpenRouter,
                 "k".into(),
+                None,
                 policy.clone(),
                 config,
                 tmp.clone(),
@@ -4056,6 +4065,7 @@ mod tests {
                 tx,
                 LlmProvider::OpenRouter,
                 "k".into(),
+                None,
                 policy,
                 config,
                 tmp,
@@ -4108,6 +4118,7 @@ mod tests {
                 tx,
                 LlmProvider::OpenRouter,
                 "k".into(),
+                None,
                 policy,
                 config,
                 tmp,

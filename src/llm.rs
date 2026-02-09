@@ -32,6 +32,37 @@ fn normalize_codex_model(model: &str) -> String {
         .unwrap_or_else(|| model.to_string())
 }
 
+fn fallback_codex_model() -> Option<String> {
+    #[derive(serde::Deserialize)]
+    struct Cache {
+        models: Vec<Model>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Model {
+        slug: Option<String>,
+    }
+
+    let path = dirs::home_dir()?.join(".codex").join("models_cache.json");
+    let raw = std::fs::read_to_string(path).ok()?;
+    let cache: Cache = serde_json::from_str(&raw).ok()?;
+    let mut slugs: Vec<String> = cache
+        .models
+        .into_iter()
+        .filter_map(|m| m.slug)
+        .filter(|s| !s.trim().is_empty())
+        .collect();
+
+    // Prefer a codex-capable slug if present.
+    if let Some(p) = slugs.iter().find(|s| s.contains("gpt-5.2-codex")) {
+        return Some(p.clone());
+    }
+    if let Some(p) = slugs.iter().find(|s| s.contains("codex")) {
+        return Some(p.clone());
+    }
+    slugs.sort();
+    slugs.first().cloned()
+}
+
 #[derive(Debug, Serialize)]
 struct ChatRequest {
     model: String,
@@ -422,13 +453,26 @@ pub async fn call_llm(
     tx: mpsc::UnboundedSender<AppEvent>,
     provider: LlmProvider,
     api_key: String,
+    codex_account_id: Option<String>,
     model: String,
     messages: Vec<ChatMessage>,
     tools_enabled: bool,
 ) {
     if matches!(provider, LlmProvider::Codex) {
         let model = normalize_codex_model(&model);
-        call_llm_codex_responses(tx, api_key, model, messages, tools_enabled).await;
+        // Refresh on every call (mirrors OpenCode behavior) so long-running sessions don't
+        // die on token expiry.
+        let auth = match crate::codex_oauth::codex_chatgpt_auth().await {
+            Ok(a) => a,
+            Err(e) => {
+                let _ = tx.send(AppEvent::AgentError(e));
+                let _ = tx.send(AppEvent::AgentDone);
+                return;
+            }
+        };
+        let account_id = codex_account_id.or(auth.account_id);
+        call_llm_codex_responses(tx, auth.access_token, account_id, model, messages, tools_enabled)
+            .await;
         return;
     }
 
@@ -685,47 +729,31 @@ fn build_codex_responses_request(
 async fn call_llm_codex_responses(
     tx: mpsc::UnboundedSender<AppEvent>,
     access_token: String,
+    account_id: Option<String>,
     model: String,
     messages: Vec<ChatMessage>,
     tools_enabled: bool,
 ) {
     let client = reqwest::Client::new();
-    let body = build_codex_responses_request(&model, &messages, tools_enabled);
-
+    let mut model = model;
     let url = format!("{}/responses", CODEX_BASE_URL.trim_end_matches('/'));
-    let resp = client
-        .post(url)
-        .header("Authorization", format!("Bearer {}", access_token))
-        .header("Content-Type", "application/json")
-        .header("Accept", "text/event-stream")
-        .json(&body)
-        .send()
-        .await;
 
-    let resp = match resp {
-        Ok(r) => r,
-        Err(e) => {
-            let _ = tx.send(AppEvent::AgentError(e.to_string()));
-            let _ = tx.send(AppEvent::AgentDone);
-            return;
+    // One retry to recover from common "wrong model id" mistakes when using Codex OAuth.
+    for attempt in 0..2 {
+        let body = build_codex_responses_request(&model, &messages, tools_enabled);
+        let mut req = client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", access_token))
+            .header("Content-Type", "application/json")
+            .header("Accept", "text/event-stream")
+            .json(&body);
+        if let Some(id) = account_id.as_ref().filter(|s| !s.trim().is_empty()) {
+            // Matches OpenCode's behavior; required for some ChatGPT subscription org setups.
+            req = req.header("ChatGPT-Account-Id", id);
         }
-    };
 
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        let _ = tx.send(AppEvent::AgentError(format!("HTTP {}: {}", status, body)));
-        let _ = tx.send(AppEvent::AgentDone);
-        return;
-    }
-
-    let mut stream = resp.bytes_stream();
-    let mut buffer = String::new();
-    let mut tool_calls: Vec<ToolCallMessage> = Vec::new();
-
-    while let Some(chunk) = stream.next().await {
-        let chunk = match chunk {
-            Ok(c) => c,
+        let resp = match req.send().await {
+            Ok(r) => r,
             Err(e) => {
                 let _ = tx.send(AppEvent::AgentError(e.to_string()));
                 let _ = tx.send(AppEvent::AgentDone);
@@ -733,100 +761,143 @@ async fn call_llm_codex_responses(
             }
         };
 
-        buffer.push_str(&String::from_utf8_lossy(&chunk));
+        if resp.status().is_success() {
+            // Continue below to stream SSE.
+            let mut stream = resp.bytes_stream();
+            let mut buffer = String::new();
+            let mut tool_calls: Vec<ToolCallMessage> = Vec::new();
 
-        // SSE events are separated by a blank line.
-        while let Some(pos) = buffer.find("\n\n") {
-            let event_block = buffer[..pos].to_string();
-            buffer = buffer[pos + 2..].to_string();
-
-            let mut data_lines = Vec::new();
-            for line in event_block.lines() {
-                let line = line.trim_end();
-                if let Some(d) = line.strip_prefix("data:") {
-                    data_lines.push(d.trim_start().to_string());
-                }
-            }
-            if data_lines.is_empty() {
-                continue;
-            }
-            let data = data_lines.join("\n").trim().to_string();
-            if data.is_empty() || data == "[DONE]" {
-                continue;
-            }
-
-            let v: serde_json::Value = match serde_json::from_str(&data) {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
-            let kind = v.get("type").and_then(|x| x.as_str()).unwrap_or("");
-            match kind {
-                "response.output_text.delta" => {
-                    if let Some(delta) = v.get("delta").and_then(|x| x.as_str()) {
-                        let _ = tx.send(AppEvent::AgentChunk(delta.to_string()));
+            while let Some(chunk) = stream.next().await {
+                let chunk = match chunk {
+                    Ok(c) => c,
+                    Err(e) => {
+                        let _ = tx.send(AppEvent::AgentError(e.to_string()));
+                        let _ = tx.send(AppEvent::AgentDone);
+                        return;
                     }
-                }
-                "response.reasoning_text.delta" => {
-                    if let Some(delta) = v.get("delta").and_then(|x| x.as_str()) {
-                        let _ = tx.send(AppEvent::AgentReasoning(delta.to_string()));
-                    }
-                }
-                "response.output_item.done" => {
-                    if let Some(item) = v.get("item").and_then(|x| x.as_object()) {
-                        let item_type = item.get("type").and_then(|x| x.as_str()).unwrap_or("");
-                        if item_type == "function_call" {
-                            let call_id = item
-                                .get("call_id")
-                                .and_then(|x| x.as_str())
-                                .unwrap_or("")
-                                .to_string();
-                            let name = item
-                                .get("name")
-                                .and_then(|x| x.as_str())
-                                .unwrap_or("")
-                                .to_string();
-                            let arguments = item
-                                .get("arguments")
-                                .and_then(|x| x.as_str())
-                                .unwrap_or("{}")
-                                .to_string();
-                            if !call_id.is_empty() && !name.is_empty() {
-                                tool_calls.push(ToolCallMessage {
-                                    id: call_id,
-                                    call_type: "function".into(),
-                                    function: ToolCallFunction { name, arguments },
-                                });
-                            }
+                };
+
+                buffer.push_str(&String::from_utf8_lossy(&chunk));
+
+                // SSE events are separated by a blank line.
+                while let Some(pos) = buffer.find("\n\n") {
+                    let event_block = buffer[..pos].to_string();
+                    buffer = buffer[pos + 2..].to_string();
+
+                    let mut data_lines = Vec::new();
+                    for line in event_block.lines() {
+                        let line = line.trim_end();
+                        if let Some(d) = line.strip_prefix("data:") {
+                            data_lines.push(d.trim_start().to_string());
                         }
                     }
-                }
-                "response.failed" => {
-                    let msg = v
-                        .get("response")
-                        .and_then(|r| r.get("error"))
-                        .and_then(|e| e.get("message"))
-                        .and_then(|m| m.as_str())
-                        .unwrap_or("response.failed");
-                    let _ = tx.send(AppEvent::AgentError(msg.to_string()));
-                }
-                _ => {}
-            }
-        }
-    }
+                    if data_lines.is_empty() {
+                        continue;
+                    }
+                    let data = data_lines.join("\n").trim().to_string();
+                    if data.is_empty() || data == "[DONE]" {
+                        continue;
+                    }
 
-    if !tool_calls.is_empty() {
-        if !tools_enabled {
-            let _ = tx.send(AppEvent::AgentError(
-                "Plan mode: tool calls requested but tools are disabled".to_string(),
-            ));
+                    let v: serde_json::Value = match serde_json::from_str(&data) {
+                        Ok(v) => v,
+                        Err(_) => continue,
+                    };
+                    let kind = v.get("type").and_then(|x| x.as_str()).unwrap_or("");
+                    match kind {
+                        "response.output_text.delta" => {
+                            if let Some(delta) = v.get("delta").and_then(|x| x.as_str()) {
+                                let _ = tx.send(AppEvent::AgentChunk(delta.to_string()));
+                            }
+                        }
+                        "response.reasoning_text.delta" => {
+                            if let Some(delta) = v.get("delta").and_then(|x| x.as_str()) {
+                                let _ = tx.send(AppEvent::AgentReasoning(delta.to_string()));
+                            }
+                        }
+                        "response.output_item.done" => {
+                            if let Some(item) = v.get("item").and_then(|x| x.as_object()) {
+                                let item_type =
+                                    item.get("type").and_then(|x| x.as_str()).unwrap_or("");
+                                if item_type == "function_call" {
+                                    let call_id = item
+                                        .get("call_id")
+                                        .and_then(|x| x.as_str())
+                                        .unwrap_or("")
+                                        .to_string();
+                                    let name = item
+                                        .get("name")
+                                        .and_then(|x| x.as_str())
+                                        .unwrap_or("")
+                                        .to_string();
+                                    let arguments = item
+                                        .get("arguments")
+                                        .and_then(|x| x.as_str())
+                                        .unwrap_or("{}")
+                                        .to_string();
+                                    if !call_id.is_empty() && !name.is_empty() {
+                                        tool_calls.push(ToolCallMessage {
+                                            id: call_id,
+                                            call_type: "function".into(),
+                                            function: ToolCallFunction { name, arguments },
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                        "response.failed" => {
+                            let msg = v
+                                .get("response")
+                                .and_then(|r| r.get("error"))
+                                .and_then(|e| e.get("message"))
+                                .and_then(|m| m.as_str())
+                                .unwrap_or("response.failed");
+                            let _ = tx.send(AppEvent::AgentError(msg.to_string()));
+                        }
+                        _ => {}
+                    }
+                }
+            }
+
+            if !tool_calls.is_empty() {
+                if !tools_enabled {
+                    let _ = tx.send(AppEvent::AgentError(
+                        "Plan mode: tool calls requested but tools are disabled".to_string(),
+                    ));
+                    let _ = tx.send(AppEvent::AgentDone);
+                    return;
+                }
+                let _ = tx.send(AppEvent::AgentToolCalls(tool_calls));
+                return;
+            }
+
             let _ = tx.send(AppEvent::AgentDone);
             return;
         }
-        let _ = tx.send(AppEvent::AgentToolCalls(tool_calls));
+
+        let status = resp.status();
+        let body_txt = resp.text().await.unwrap_or_default();
+
+        // Retry with a Codex model slug if the backend rejects the current model.
+        if attempt == 0
+            && status.as_u16() == 400
+            && (body_txt.contains("model is not supported")
+                || body_txt.contains("not supported when using Codex"))
+        {
+            if let Some(fallback) = fallback_codex_model() {
+                if fallback != model {
+                    model = fallback;
+                    continue;
+                }
+            }
+        }
+
+        let _ = tx.send(AppEvent::AgentError(format!("HTTP {}: {}", status, body_txt)));
+        let _ = tx.send(AppEvent::AgentDone);
         return;
     }
 
-    let _ = tx.send(AppEvent::AgentDone);
+    // Unreachable: loop returns on success or error.
 }
 
 #[cfg(test)]

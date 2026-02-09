@@ -41,7 +41,9 @@ use ui::ui;
 
 use llm::LlmProvider;
 
-async fn load_llm_credentials(preferred_from_config: Option<String>) -> Result<(LlmProvider, String), String> {
+async fn load_llm_credentials(
+    preferred_from_config: Option<String>,
+) -> Result<(LlmProvider, String, Option<String>), String> {
     // Try project-local .env first.
     let _ = dotenvy::dotenv();
 
@@ -75,23 +77,23 @@ async fn load_llm_credentials(preferred_from_config: Option<String>) -> Result<(
     };
 
     let try_codex = || async {
-        let token = codex_oauth::codex_chatgpt_access_token().await?;
-        if token.trim().is_empty() {
+        let auth = codex_oauth::codex_chatgpt_auth().await?;
+        if auth.access_token.trim().is_empty() {
             return Err("Codex OAuth present but returned an empty access token".to_string());
         }
-        Ok((LlmProvider::Codex, token))
+        Ok((LlmProvider::Codex, auth.access_token, auth.account_id))
     };
 
     match preferred.as_deref() {
         Some("openrouter") => {
             if let Some(v) = try_openrouter() {
-                return Ok(v);
+                return Ok((v.0, v.1, None));
             }
             return Err("LORIKEET_PROVIDER=openrouter but OPENROUTER_API_KEY is not set".into());
         }
         Some("openai") => {
             if let Some(v) = try_openai() {
-                return Ok(v);
+                return Ok((v.0, v.1, None));
             }
             return Err("LORIKEET_PROVIDER=openai but OPENAI_API_KEY is not set".into());
         }
@@ -100,10 +102,10 @@ async fn load_llm_credentials(preferred_from_config: Option<String>) -> Result<(
     }
 
     if let Some(v) = try_openrouter() {
-        return Ok(v);
+        return Ok((v.0, v.1, None));
     }
     if let Some(v) = try_openai() {
-        return Ok(v);
+        return Ok((v.0, v.1, None));
     }
     match try_codex().await {
         Ok(v) => Ok(v),
@@ -148,7 +150,8 @@ async fn main() -> Result<()> {
         .as_ref()
         .and_then(|g| g.provider.clone());
 
-    let (provider, api_key) = match load_llm_credentials(preferred_provider).await {
+    let (provider, api_key, codex_account_id) =
+        match load_llm_credentials(preferred_provider).await {
         Ok(v) => v,
         Err(msg) => {
             eprintln!("{}", msg);
@@ -203,6 +206,7 @@ async fn main() -> Result<()> {
         event_tx,
         provider,
         api_key,
+        codex_account_id,
         sandbox_policy,
         config.clone(),
         workspace_root.clone(),

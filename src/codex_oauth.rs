@@ -3,6 +3,12 @@ use std::path::PathBuf;
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone)]
+pub struct CodexChatgptAuth {
+    pub access_token: String,
+    pub account_id: Option<String>,
+}
+
 #[derive(Debug, Deserialize, Serialize, Clone)]
 struct CodexAuthFile {
     #[serde(default)]
@@ -118,9 +124,21 @@ async fn load_fresh_tokens() -> Result<CodexTokens, String> {
 /// Lorikeet reads `~/.codex/auth.json` created by `codex login`, refreshes if needed,
 /// and returns the `access_token`. We do **not** write back to `auth.json`.
 pub async fn codex_chatgpt_access_token() -> Result<String, String> {
+    let auth = codex_chatgpt_auth().await?;
+    if auth.access_token.trim().is_empty() {
+        return Err("Codex OAuth access_token is empty".into());
+    }
+    Ok(auth.access_token)
+}
+
+/// Return the access token plus optional ChatGPT Account ID (used by Codex subscriptions).
+pub async fn codex_chatgpt_auth() -> Result<CodexChatgptAuth, String> {
     let tokens = load_fresh_tokens().await?;
     if tokens.access_token.trim().is_empty() {
         return Err("Codex OAuth access_token is empty".into());
     }
-    Ok(tokens.access_token)
+    Ok(CodexChatgptAuth {
+        access_token: tokens.access_token,
+        account_id: tokens.account_id,
+    })
 }
