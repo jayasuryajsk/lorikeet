@@ -226,7 +226,7 @@ fn builtin_palettes() -> HashMap<&'static str, UiPalette> {
         (
             "opencode",
             UiPalette {
-                fg: Color::Reset,
+                fg: rgb("#e5e7eb"),
                 fg_dim: rgb("#6b7280"),
                 bg: rgb("#0b1220"),
                 border: rgb("#4b5563"),
@@ -239,7 +239,7 @@ fn builtin_palettes() -> HashMap<&'static str, UiPalette> {
         (
             "tokyonight",
             UiPalette {
-                fg: Color::Reset,
+                fg: rgb("#c0caf5"),
                 fg_dim: rgb("#565f89"),
                 bg: rgb("#1a1b26"),
                 border: rgb("#414868"),
@@ -252,7 +252,7 @@ fn builtin_palettes() -> HashMap<&'static str, UiPalette> {
         (
             "everforest",
             UiPalette {
-                fg: Color::Reset,
+                fg: rgb("#d3c6aa"),
                 fg_dim: rgb("#859289"),
                 bg: rgb("#2b3339"),
                 border: rgb("#4f585e"),
@@ -265,7 +265,7 @@ fn builtin_palettes() -> HashMap<&'static str, UiPalette> {
         (
             "ayu",
             UiPalette {
-                fg: Color::Reset,
+                fg: rgb("#e6e1cf"),
                 fg_dim: rgb("#707a8c"),
                 bg: rgb("#0f1419"),
                 border: rgb("#3d424d"),
@@ -278,7 +278,7 @@ fn builtin_palettes() -> HashMap<&'static str, UiPalette> {
         (
             "catppuccin",
             UiPalette {
-                fg: Color::Reset,
+                fg: rgb("#cdd6f4"),
                 fg_dim: rgb("#6c7086"),
                 bg: rgb("#1e1e2e"),
                 border: rgb("#45475a"),
@@ -291,7 +291,7 @@ fn builtin_palettes() -> HashMap<&'static str, UiPalette> {
         (
             "gruvbox",
             UiPalette {
-                fg: Color::Reset,
+                fg: rgb("#ebdbb2"),
                 fg_dim: rgb("#928374"),
                 bg: rgb("#282828"),
                 border: rgb("#665c54"),
@@ -304,7 +304,7 @@ fn builtin_palettes() -> HashMap<&'static str, UiPalette> {
         (
             "kanagawa",
             UiPalette {
-                fg: Color::Reset,
+                fg: rgb("#dcd7ba"),
                 fg_dim: rgb("#727169"),
                 bg: rgb("#1f1f28"),
                 border: rgb("#54546d"),
@@ -317,7 +317,7 @@ fn builtin_palettes() -> HashMap<&'static str, UiPalette> {
         (
             "nord",
             UiPalette {
-                fg: Color::Reset,
+                fg: rgb("#d8dee9"),
                 fg_dim: rgb("#616e88"),
                 bg: rgb("#2e3440"),
                 border: rgb("#4c566a"),
@@ -330,7 +330,7 @@ fn builtin_palettes() -> HashMap<&'static str, UiPalette> {
         (
             "matrix",
             UiPalette {
-                fg: Color::Reset,
+                fg: rgb("#00ff5f"),
                 fg_dim: rgb("#00aa3f"),
                 bg: rgb("#00110a"),
                 border: rgb("#007a2c"),
@@ -343,7 +343,7 @@ fn builtin_palettes() -> HashMap<&'static str, UiPalette> {
         (
             "one-dark",
             UiPalette {
-                fg: Color::Reset,
+                fg: rgb("#abb2bf"),
                 fg_dim: rgb("#5c6370"),
                 bg: rgb("#282c34"),
                 border: rgb("#4b5263"),
@@ -357,6 +357,16 @@ fn builtin_palettes() -> HashMap<&'static str, UiPalette> {
 }
 
 fn theme_from_palette(p: UiPalette) -> UiTheme {
+    let p = if p.bg != Color::Reset && p.fg == Color::Reset {
+        // Safety: a theme that sets a background but inherits terminal fg will be unreadable
+        // on light terminals (black-on-dark). Make it self-contained.
+        UiPalette {
+            fg: rgb("#e5e7eb"),
+            ..p
+        }
+    } else {
+        p
+    };
     // Stronger defaults than previous Lorikeet themeing: markdown + tool trace are themed
     // using semantic palette colors. Backgrounds default to terminal-default (Reset).
     let md = MarkdownTheme {
