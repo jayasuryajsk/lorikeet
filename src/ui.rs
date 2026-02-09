@@ -252,7 +252,10 @@ fn render_command_suggestions_overlay(
 
     frame.render_widget(Clear, area);
     if pal.bg != Color::Reset {
-        frame.render_widget(Fill::new(Style::default().bg(pal.bg)), area);
+        frame.render_widget(
+            Fill::new(Style::default().bg(pal.bg).fg(pal.fg)),
+            area,
+        );
     }
     let block = Block::default()
         .borders(Borders::ALL)
@@ -322,7 +325,10 @@ fn render_settings_popup(frame: &mut Frame, app: &mut App) {
 
     frame.render_widget(Clear, popup_area);
     if pal.bg != Color::Reset {
-        frame.render_widget(Fill::new(Style::default().bg(pal.bg)), popup_area);
+        frame.render_widget(
+            Fill::new(Style::default().bg(pal.bg).fg(pal.fg)),
+            popup_area,
+        );
     }
 
     let block = Block::default()
@@ -560,7 +566,10 @@ fn render_themes_popup(frame: &mut Frame, app: &mut App) {
 
     frame.render_widget(Clear, popup_area);
     if pal.bg != Color::Reset {
-        frame.render_widget(Fill::new(Style::default().bg(pal.bg)), popup_area);
+        frame.render_widget(
+            Fill::new(Style::default().bg(pal.bg).fg(pal.fg)),
+            popup_area,
+        );
     }
 
     let block = Block::default()
@@ -718,7 +727,10 @@ fn render_plan_popup(frame: &mut Frame, app: &mut App, ui_theme: &theme::UiTheme
 
     frame.render_widget(Clear, popup_area);
     if pal.bg != Color::Reset {
-        frame.render_widget(Fill::new(Style::default().bg(pal.bg)), popup_area);
+        frame.render_widget(
+            Fill::new(Style::default().bg(pal.bg).fg(pal.fg)),
+            popup_area,
+        );
     }
     let block = Block::default()
         .borders(Borders::ALL)

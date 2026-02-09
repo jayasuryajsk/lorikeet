@@ -13,32 +13,48 @@ struct StyleState {
 }
 
 fn style_for_state(theme: MarkdownTheme, state: StyleState) -> Style {
-    let mut style = Style::default().fg(theme.text);
+    let mut style = Style::default();
+    if theme.text != Color::Reset {
+        style = style.fg(theme.text);
+    }
 
     if state.code {
         // Prefer high-contrast foreground; background stays terminal default.
-        style = style
-            .fg(theme.code)
-            .bg(theme.code_bg)
-            .add_modifier(Modifier::BOLD);
+        if theme.code != Color::Reset {
+            style = style.fg(theme.code);
+        }
+        if theme.code_bg != Color::Reset {
+            style = style.bg(theme.code_bg);
+        }
+        style = style.add_modifier(Modifier::BOLD);
     }
 
     if state.link {
-        style = style.fg(theme.link).underlined();
+        if theme.link != Color::Reset {
+            style = style.fg(theme.link);
+        }
+        style = style.underlined();
     }
 
     if state.bold {
-        style = style.fg(theme.bold).bold();
+        if theme.bold != Color::Reset {
+            style = style.fg(theme.bold);
+        }
+        style = style.bold();
     }
 
     if state.italic {
-        style = style.fg(theme.italic).italic();
+        if theme.italic != Color::Reset {
+            style = style.fg(theme.italic);
+        }
+        style = style.italic();
     }
 
     if state.strikethrough {
-        style = style
-            .fg(theme.strikethrough)
-            .add_modifier(Modifier::CROSSED_OUT);
+        if theme.strikethrough != Color::Reset {
+            style = style.fg(theme.strikethrough);
+        }
+        style = style.add_modifier(Modifier::CROSSED_OUT);
     }
 
     style
@@ -98,7 +114,13 @@ fn highlight_code(
                 let color = syntax_color(&current, lang, syn);
                 spans.push(Span::styled(
                     std::mem::take(&mut current),
-                    Style::default().fg(color).bg(theme.code_bg),
+                    {
+                        let mut s = Style::default().fg(color);
+                        if theme.code_bg != Color::Reset {
+                            s = s.bg(theme.code_bg);
+                        }
+                        s
+                    },
                 ));
             }
             in_string = true;
@@ -108,7 +130,13 @@ fn highlight_code(
             current.push(c);
             spans.push(Span::styled(
                 std::mem::take(&mut current),
-                Style::default().fg(Color::Green).bg(theme.code_bg),
+                {
+                    let mut s = Style::default().fg(Color::Green);
+                    if theme.code_bg != Color::Reset {
+                        s = s.bg(theme.code_bg);
+                    }
+                    s
+                },
             ));
             in_string = false;
         } else if in_string {
@@ -123,13 +151,25 @@ fn highlight_code(
                 let color = syntax_color(&current, lang, syn);
                 spans.push(Span::styled(
                     std::mem::take(&mut current),
-                    Style::default().fg(color).bg(theme.code_bg),
+                    {
+                        let mut s = Style::default().fg(color);
+                        if theme.code_bg != Color::Reset {
+                            s = s.bg(theme.code_bg);
+                        }
+                        s
+                    },
                 ));
             }
             spans.push(Span::styled(
                 c.to_string(),
                 // Avoid hard-coded white, which becomes unreadable on light terminals.
-                Style::default().fg(syn.punct).bg(theme.code_bg),
+                {
+                    let mut s = Style::default().fg(syn.punct);
+                    if theme.code_bg != Color::Reset {
+                        s = s.bg(theme.code_bg);
+                    }
+                    s
+                },
             ));
         }
     }
@@ -144,14 +184,26 @@ fn highlight_code(
         };
         spans.push(Span::styled(
             current,
-            Style::default().fg(color).bg(theme.code_bg),
+            {
+                let mut s = Style::default().fg(color);
+                if theme.code_bg != Color::Reset {
+                    s = s.bg(theme.code_bg);
+                }
+                s
+            },
         ));
     }
 
     if spans.is_empty() {
         spans.push(Span::styled(
             code.to_string(),
-            Style::default().fg(syn.ident).bg(theme.code_bg),
+            {
+                let mut s = Style::default().fg(syn.ident);
+                if theme.code_bg != Color::Reset {
+                    s = s.bg(theme.code_bg);
+                }
+                s
+            },
         ));
     }
 
@@ -383,14 +435,26 @@ pub fn render(
                 TagEnd::CodeBlock => {
                     for code_line in &code_block_content {
                         let mut spans =
-                            vec![Span::styled("  ", Style::default().bg(theme.code_bg))];
+                            vec![Span::styled(
+                                "  ",
+                                if theme.code_bg == Color::Reset {
+                                    Style::default()
+                                } else {
+                                    Style::default().bg(theme.code_bg)
+                                },
+                            )];
                         spans.extend(highlight_code(code_line, &code_lang, theme, syn));
                         let current_len: usize =
                             spans.iter().map(|s| s.content.chars().count()).sum();
                         if current_len < width.saturating_sub(2) {
+                            let pad_style = if theme.code_bg == Color::Reset {
+                                Style::default()
+                            } else {
+                                Style::default().bg(theme.code_bg)
+                            };
                             spans.push(Span::styled(
                                 " ".repeat(width.saturating_sub(current_len + 2)),
-                                Style::default().bg(theme.code_bg),
+                                pad_style,
                             ));
                         }
                         let line = Line::from(spans);
@@ -429,7 +493,13 @@ pub fn render(
                 }
             }
             Event::Code(code) => {
-                let style = Style::default().fg(theme.code).bg(theme.code_bg);
+                let mut style = Style::default();
+                if theme.code != Color::Reset {
+                    style = style.fg(theme.code);
+                }
+                if theme.code_bg != Color::Reset {
+                    style = style.bg(theme.code_bg);
+                }
                 current_segment.push(Span::styled(code.to_string(), style));
             }
             Event::SoftBreak => {
