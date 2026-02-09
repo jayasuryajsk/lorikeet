@@ -41,7 +41,7 @@ use ui::ui;
 
 use llm::LlmProvider;
 
-async fn load_llm_credentials() -> Result<(LlmProvider, String), String> {
+async fn load_llm_credentials(preferred_from_config: Option<String>) -> Result<(LlmProvider, String), String> {
     // Try project-local .env first.
     let _ = dotenvy::dotenv();
 
@@ -55,7 +55,8 @@ async fn load_llm_credentials() -> Result<(LlmProvider, String), String> {
 
     let preferred = std::env::var("LORIKEET_PROVIDER")
         .ok()
-        .map(|s| s.to_lowercase());
+        .map(|s| s.to_lowercase())
+        .or_else(|| preferred_from_config.map(|s| s.to_lowercase()));
 
     let try_openrouter = || -> Option<(LlmProvider, String)> {
         std::env::var("OPENROUTER_API_KEY")
@@ -74,11 +75,11 @@ async fn load_llm_credentials() -> Result<(LlmProvider, String), String> {
     };
 
     let try_codex = || async {
-        let k = codex_oauth::openai_api_key_from_codex_oauth().await?;
-        if k.trim().is_empty() {
-            return Err("Codex OAuth present but returned an empty API key".to_string());
+        let token = codex_oauth::codex_chatgpt_access_token().await?;
+        if token.trim().is_empty() {
+            return Err("Codex OAuth present but returned an empty access token".to_string());
         }
-        Ok((LlmProvider::OpenAI, k))
+        Ok((LlmProvider::Codex, token))
     };
 
     match preferred.as_deref() {
@@ -107,7 +108,7 @@ async fn load_llm_credentials() -> Result<(LlmProvider, String), String> {
     match try_codex().await {
         Ok(v) => Ok(v),
         Err(e) => Err(format!(
-            "No API key found.\n\nSet OPENROUTER_API_KEY or OPENAI_API_KEY, or sign in via Codex CLI.\n\nOptional: set LORIKEET_PROVIDER=openrouter|openai|codex\n\nDetails: {}",
+            "No credentials found.\n\nSet OPENROUTER_API_KEY or OPENAI_API_KEY, or sign in via Codex CLI.\n\nOptional: set LORIKEET_PROVIDER=openrouter|openai|codex\n\nDetails: {}",
             e
         )),
     }
@@ -140,7 +141,14 @@ async fn main() -> Result<()> {
             }
         }
     }
-    let (provider, api_key) = match load_llm_credentials().await {
+    let workspace_root = std::env::current_dir()?;
+    let config = AppConfig::load();
+    let preferred_provider = config
+        .general
+        .as_ref()
+        .and_then(|g| g.provider.clone());
+
+    let (provider, api_key) = match load_llm_credentials(preferred_provider).await {
         Ok(v) => v,
         Err(msg) => {
             eprintln!("{}", msg);
@@ -179,8 +187,6 @@ async fn main() -> Result<()> {
         }
     });
 
-    let workspace_root = std::env::current_dir()?;
-    let config = AppConfig::load();
     let sandbox_policy = std::sync::Arc::new(SandboxPolicy::from_config(
         config.clone(),
         workspace_root.clone(),

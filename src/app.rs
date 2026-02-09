@@ -1504,6 +1504,12 @@ impl App {
                 }
                 if self.current_settings_item() == SettingsItem::ThemePreset {
                     self.cycle_theme_preset(false);
+                } else if self.current_settings_item() == SettingsItem::Provider {
+                    self.cycle_provider(false);
+                } else if self.current_settings_item() == SettingsItem::Model
+                    && self.settings_provider_name() == "codex"
+                {
+                    self.cycle_codex_model(false);
                 } else {
                     self.settings_cursor = self.settings_cursor.saturating_sub(1);
                 }
@@ -1514,6 +1520,12 @@ impl App {
                 }
                 if self.current_settings_item() == SettingsItem::ThemePreset {
                     self.cycle_theme_preset(true);
+                } else if self.current_settings_item() == SettingsItem::Provider {
+                    self.cycle_provider(true);
+                } else if self.current_settings_item() == SettingsItem::Model
+                    && self.settings_provider_name() == "codex"
+                {
+                    self.cycle_codex_model(true);
                 } else if self.settings_cursor < self.settings_input.len() {
                     self.settings_cursor += 1;
                 }
@@ -1588,6 +1600,12 @@ impl App {
 
     fn read_settings_value(&self, item: SettingsItem) -> String {
         match item {
+            SettingsItem::Provider => self
+                .settings_draft
+                .general
+                .as_ref()
+                .and_then(|g| g.provider.clone())
+                .unwrap_or_else(|| "openrouter".to_string()),
             SettingsItem::Model => self
                 .settings_draft
                 .general
@@ -1705,6 +1723,45 @@ impl App {
     fn apply_settings_input(&mut self) {
         let item = self.current_settings_item();
         match item {
+            SettingsItem::Provider => {
+                let prev = self
+                    .settings_draft
+                    .general
+                    .as_ref()
+                    .and_then(|g| g.provider.clone())
+                    .unwrap_or_else(|| "openrouter".to_string());
+
+                let mut v = self.settings_input.trim().to_lowercase();
+                if v.is_empty() {
+                    v = "openrouter".to_string();
+                }
+
+                // Apply immediately (best-effort). If it fails, keep the old provider.
+                match self.try_switch_provider(&v) {
+                    Ok(()) => {
+                        let mut general = self.settings_draft.general.clone().unwrap_or_default();
+                        general.provider = Some(v);
+                        self.settings_draft.general = Some(general);
+                    }
+                    Err(e) => {
+                        self.messages.push(Message {
+                            role: Role::Agent,
+                            content: format!("[Provider switch failed: {}]", e),
+                            reasoning: None,
+                            tool_calls: None,
+                            tool_group_id: None,
+                            local: true,
+                        });
+                        self.scroll_messages_to_bottom();
+
+                        let mut general = self.settings_draft.general.clone().unwrap_or_default();
+                        general.provider = Some(prev.clone());
+                        self.settings_draft.general = Some(general);
+                        self.settings_input = prev;
+                        self.settings_cursor = self.settings_input.len();
+                    }
+                }
+            }
             SettingsItem::Model => {
                 let mut general = self.settings_draft.general.clone().unwrap_or_default();
                 let value = self.settings_input.trim().to_string();
@@ -1829,6 +1886,69 @@ impl App {
         }
     }
 
+    fn try_switch_provider(&mut self, provider: &str) -> Result<(), String> {
+        fn reload_env() {
+            // Project-local .env.
+            let _ = dotenvy::dotenv();
+            // User-level ~/.lorikeet/.env.
+            if let Some(home) = dirs::home_dir() {
+                let user_env = home.join(".lorikeet").join(".env");
+                if user_env.exists() {
+                    let _ = dotenvy::from_path(user_env);
+                }
+            }
+        }
+
+        let p = provider.trim().to_lowercase();
+        let (llm_provider, api_key) = match p.as_str() {
+            "openrouter" => {
+                reload_env();
+                let k = std::env::var("OPENROUTER_API_KEY")
+                    .map_err(|_| "OPENROUTER_API_KEY is not set".to_string())?;
+                let k = k.trim().to_string();
+                if k.is_empty() {
+                    return Err("OPENROUTER_API_KEY is empty".to_string());
+                }
+                (LlmProvider::OpenRouter, k)
+            }
+            "openai" => {
+                reload_env();
+                let k = std::env::var("OPENAI_API_KEY")
+                    .map_err(|_| "OPENAI_API_KEY is not set".to_string())?;
+                let k = k.trim().to_string();
+                if k.is_empty() {
+                    return Err("OPENAI_API_KEY is empty".to_string());
+                }
+                (LlmProvider::OpenAI, k)
+            }
+            "codex" | "codex_oauth" => {
+                let token_res = match tokio::runtime::Handle::try_current() {
+                    Ok(h) => tokio::task::block_in_place(|| {
+                        h.block_on(crate::codex_oauth::codex_chatgpt_access_token())
+                    }),
+                    Err(_) => {
+                        let rt = tokio::runtime::Runtime::new().map_err(|e| {
+                            format!("Failed to create runtime for Codex OAuth: {e}")
+                        })?;
+                        rt.block_on(crate::codex_oauth::codex_chatgpt_access_token())
+                    }
+                };
+                let token = token_res?;
+                if token.trim().is_empty() {
+                    return Err("Codex OAuth returned an empty access token".to_string());
+                }
+                (LlmProvider::Codex, token)
+            }
+            _ => {
+                return Err("Unknown provider. Use: openrouter | openai | codex".to_string());
+            }
+        };
+
+        self.llm_provider = llm_provider;
+        self.api_key = api_key;
+        Ok(())
+    }
+
     pub fn open_settings(&mut self) {
         self.settings_open = true;
         self.settings_focus = SettingsFocus::Items;
@@ -1944,6 +2064,74 @@ impl App {
         // Live preview while settings modal is open.
         self.config = self.settings_draft.clone();
         self.settings_input = new;
+        self.settings_cursor = self.settings_input.len();
+    }
+
+    fn cycle_provider(&mut self, next: bool) {
+        let providers = ["openrouter", "openai", "codex"];
+        let cur = self.settings_input.trim().to_lowercase();
+        let idx = providers.iter().position(|p| *p == cur).unwrap_or(0);
+        let new_idx = if next {
+            (idx + 1) % providers.len()
+        } else if idx == 0 {
+            providers.len() - 1
+        } else {
+            idx - 1
+        };
+        self.settings_input = providers[new_idx].to_string();
+        self.settings_cursor = self.settings_input.len();
+    }
+
+    fn settings_provider_name(&self) -> &str {
+        self.settings_draft
+            .general
+            .as_ref()
+            .and_then(|g| g.provider.as_deref())
+            .unwrap_or("openrouter")
+    }
+
+    fn cycle_codex_model(&mut self, next: bool) {
+        #[derive(serde::Deserialize)]
+        struct Cache {
+            models: Vec<Model>,
+        }
+        #[derive(serde::Deserialize)]
+        struct Model {
+            slug: Option<String>,
+        }
+
+        let mut models: Vec<String> = dirs::home_dir()
+            .map(|h| h.join(".codex").join("models_cache.json"))
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .and_then(|s| serde_json::from_str::<Cache>(&s).ok())
+            .map(|c| {
+                c.models
+                    .into_iter()
+                    .filter_map(|m| m.slug)
+                    .filter(|s| !s.trim().is_empty())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
+        if models.is_empty() {
+            models = vec![
+                "gpt-5.2-codex".to_string(),
+                "gpt-5.2".to_string(),
+                "gpt-5".to_string(),
+            ];
+        }
+
+        let cur = self.settings_input.trim().to_string();
+        let idx = models.iter().position(|m| m == &cur).unwrap_or(0);
+        let new_idx = if next {
+            (idx + 1) % models.len()
+        } else if idx == 0 {
+            models.len() - 1
+        } else {
+            idx - 1
+        };
+
+        self.settings_input = models[new_idx].clone();
         self.settings_cursor = self.settings_input.len();
     }
 
@@ -3100,6 +3288,14 @@ impl App {
     pub fn workspace_root_path(&self) -> &std::path::Path {
         &self.workspace_root
     }
+
+    pub fn llm_provider_name(&self) -> &'static str {
+        match self.llm_provider {
+            LlmProvider::OpenRouter => "openrouter",
+            LlmProvider::OpenAI => "openai",
+            LlmProvider::Codex => "codex",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -3264,6 +3460,7 @@ impl SettingsCategory {
     fn items(&self) -> &'static [SettingsItem] {
         match self {
             SettingsCategory::General => &[
+                SettingsItem::Provider,
                 SettingsItem::Model,
                 SettingsItem::SplitRatio,
                 SettingsItem::AutoIndex,
@@ -3292,6 +3489,7 @@ impl SettingsCategory {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SettingsItem {
+    Provider,
     Model,
     ThemePreset,
     SplitRatio,
@@ -3314,6 +3512,7 @@ enum SettingsItem {
 impl SettingsItem {
     fn label(&self) -> &'static str {
         match self {
+            SettingsItem::Provider => "Provider",
             SettingsItem::Model => "Model",
             SettingsItem::ThemePreset => "Theme",
             SettingsItem::SplitRatio => "Split ratio",

@@ -8,11 +8,13 @@ use crate::types::{ToolCallFunction, ToolCallMessage};
 pub const MODEL: &str = "z-ai/glm-4.7-flash";
 const OPENROUTER_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
 const OPENAI_URL: &str = "https://api.openai.com/v1/chat/completions";
+const CODEX_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LlmProvider {
     OpenRouter,
     OpenAI,
+    Codex,
 }
 
 #[derive(Debug, Serialize)]
@@ -409,6 +411,11 @@ pub async fn call_llm(
     messages: Vec<ChatMessage>,
     tools_enabled: bool,
 ) {
+    if matches!(provider, LlmProvider::Codex) {
+        call_llm_codex_responses(tx, api_key, model, messages, tools_enabled).await;
+        return;
+    }
+
     let client = reqwest::Client::new();
 
     let request = ChatRequest {
@@ -425,6 +432,7 @@ pub async fn call_llm(
     let url = match provider {
         LlmProvider::OpenRouter => OPENROUTER_URL,
         LlmProvider::OpenAI => OPENAI_URL,
+        LlmProvider::Codex => OPENAI_URL, // unreachable (handled above)
     };
 
     let mut req = client
@@ -562,6 +570,249 @@ pub async fn call_llm(
     let _ = tx.send(AppEvent::AgentDone);
 }
 
+fn tools_for_responses(tools_enabled: bool) -> Vec<serde_json::Value> {
+    if !tools_enabled {
+        return Vec::new();
+    }
+    get_tools()
+        .into_iter()
+        .map(|t| {
+            serde_json::json!({
+                "type": "function",
+                "name": t.function.name,
+                "description": t.function.description,
+                "parameters": t.function.parameters,
+            })
+        })
+        .collect()
+}
+
+fn build_codex_responses_request(
+    model: &str,
+    messages: &[ChatMessage],
+    tools_enabled: bool,
+) -> serde_json::Value {
+    // Codex Responses API expects:
+    // - instructions: string (system prompt)
+    // - input: array of items (messages + function_call + function_call_output)
+    let mut instructions_parts: Vec<String> = Vec::new();
+    let mut input: Vec<serde_json::Value> = Vec::new();
+
+    for m in messages {
+        let role = m.role.as_str();
+        let content = m.content.as_deref().unwrap_or("").to_string();
+
+        if role == "system" {
+            if !content.trim().is_empty() {
+                instructions_parts.push(content);
+            }
+            continue;
+        }
+
+        if role == "tool" {
+            if let Some(call_id) = m.tool_call_id.as_deref().filter(|s| !s.trim().is_empty()) {
+                input.push(serde_json::json!({
+                    "type": "function_call_output",
+                    "call_id": call_id,
+                    "output": content,
+                }));
+            }
+            continue;
+        }
+
+        if !content.trim().is_empty() {
+            let item_type = if role == "assistant" {
+                "output_text"
+            } else {
+                "input_text"
+            };
+            input.push(serde_json::json!({
+                "type": "message",
+                "role": role,
+                "content": [
+                    {"type": item_type, "text": content}
+                ]
+            }));
+        }
+
+        // Assistant tool calls are represented as separate output items in the Responses API.
+        if role == "assistant" {
+            if let Some(calls) = &m.tool_calls {
+                for tc in calls {
+                    input.push(serde_json::json!({
+                        "type": "function_call",
+                        "name": tc.function.name,
+                        "arguments": tc.function.arguments,
+                        "call_id": tc.id,
+                    }));
+                }
+            }
+        }
+    }
+
+    let instructions = instructions_parts.join("\n\n");
+    let tools = tools_for_responses(tools_enabled);
+
+    serde_json::json!({
+        "model": model,
+        "instructions": instructions,
+        "input": input,
+        "tools": tools,
+        "tool_choice": "auto",
+        "parallel_tool_calls": false,
+        "store": false,
+        "stream": true,
+        "include": [],
+    })
+}
+
+async fn call_llm_codex_responses(
+    tx: mpsc::UnboundedSender<AppEvent>,
+    access_token: String,
+    model: String,
+    messages: Vec<ChatMessage>,
+    tools_enabled: bool,
+) {
+    let client = reqwest::Client::new();
+    let body = build_codex_responses_request(&model, &messages, tools_enabled);
+
+    let url = format!("{}/responses", CODEX_BASE_URL.trim_end_matches('/'));
+    let resp = client
+        .post(url)
+        .header("Authorization", format!("Bearer {}", access_token))
+        .header("Content-Type", "application/json")
+        .header("Accept", "text/event-stream")
+        .json(&body)
+        .send()
+        .await;
+
+    let resp = match resp {
+        Ok(r) => r,
+        Err(e) => {
+            let _ = tx.send(AppEvent::AgentError(e.to_string()));
+            let _ = tx.send(AppEvent::AgentDone);
+            return;
+        }
+    };
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        let _ = tx.send(AppEvent::AgentError(format!("HTTP {}: {}", status, body)));
+        let _ = tx.send(AppEvent::AgentDone);
+        return;
+    }
+
+    let mut stream = resp.bytes_stream();
+    let mut buffer = String::new();
+    let mut tool_calls: Vec<ToolCallMessage> = Vec::new();
+
+    while let Some(chunk) = stream.next().await {
+        let chunk = match chunk {
+            Ok(c) => c,
+            Err(e) => {
+                let _ = tx.send(AppEvent::AgentError(e.to_string()));
+                let _ = tx.send(AppEvent::AgentDone);
+                return;
+            }
+        };
+
+        buffer.push_str(&String::from_utf8_lossy(&chunk));
+
+        // SSE events are separated by a blank line.
+        while let Some(pos) = buffer.find("\n\n") {
+            let event_block = buffer[..pos].to_string();
+            buffer = buffer[pos + 2..].to_string();
+
+            let mut data_lines = Vec::new();
+            for line in event_block.lines() {
+                let line = line.trim_end();
+                if let Some(d) = line.strip_prefix("data:") {
+                    data_lines.push(d.trim_start().to_string());
+                }
+            }
+            if data_lines.is_empty() {
+                continue;
+            }
+            let data = data_lines.join("\n").trim().to_string();
+            if data.is_empty() || data == "[DONE]" {
+                continue;
+            }
+
+            let v: serde_json::Value = match serde_json::from_str(&data) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            let kind = v.get("type").and_then(|x| x.as_str()).unwrap_or("");
+            match kind {
+                "response.output_text.delta" => {
+                    if let Some(delta) = v.get("delta").and_then(|x| x.as_str()) {
+                        let _ = tx.send(AppEvent::AgentChunk(delta.to_string()));
+                    }
+                }
+                "response.reasoning_text.delta" => {
+                    if let Some(delta) = v.get("delta").and_then(|x| x.as_str()) {
+                        let _ = tx.send(AppEvent::AgentReasoning(delta.to_string()));
+                    }
+                }
+                "response.output_item.done" => {
+                    if let Some(item) = v.get("item").and_then(|x| x.as_object()) {
+                        let item_type = item.get("type").and_then(|x| x.as_str()).unwrap_or("");
+                        if item_type == "function_call" {
+                            let call_id = item
+                                .get("call_id")
+                                .and_then(|x| x.as_str())
+                                .unwrap_or("")
+                                .to_string();
+                            let name = item
+                                .get("name")
+                                .and_then(|x| x.as_str())
+                                .unwrap_or("")
+                                .to_string();
+                            let arguments = item
+                                .get("arguments")
+                                .and_then(|x| x.as_str())
+                                .unwrap_or("{}")
+                                .to_string();
+                            if !call_id.is_empty() && !name.is_empty() {
+                                tool_calls.push(ToolCallMessage {
+                                    id: call_id,
+                                    call_type: "function".into(),
+                                    function: ToolCallFunction { name, arguments },
+                                });
+                            }
+                        }
+                    }
+                }
+                "response.failed" => {
+                    let msg = v
+                        .get("response")
+                        .and_then(|r| r.get("error"))
+                        .and_then(|e| e.get("message"))
+                        .and_then(|m| m.as_str())
+                        .unwrap_or("response.failed");
+                    let _ = tx.send(AppEvent::AgentError(msg.to_string()));
+                }
+                _ => {}
+            }
+        }
+    }
+
+    if !tool_calls.is_empty() {
+        if !tools_enabled {
+            let _ = tx.send(AppEvent::AgentError(
+                "Plan mode: tool calls requested but tools are disabled".to_string(),
+            ));
+            let _ = tx.send(AppEvent::AgentDone);
+            return;
+        }
+        let _ = tx.send(AppEvent::AgentToolCalls(tool_calls));
+        return;
+    }
+
+    let _ = tx.send(AppEvent::AgentDone);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -622,6 +873,9 @@ pub async fn call_llm_nonstream(
     let url = match provider {
         LlmProvider::OpenRouter => OPENROUTER_URL,
         LlmProvider::OpenAI => OPENAI_URL,
+        LlmProvider::Codex => {
+            return Err("Codex provider: non-streaming calls are not supported yet".to_string())
+        }
     };
 
     let mut req = client

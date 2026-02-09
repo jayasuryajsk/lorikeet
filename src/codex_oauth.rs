@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use base64::Engine;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -65,78 +66,38 @@ async fn refresh_tokens(refresh_token: &str) -> Result<TokenResponse, String> {
         .map_err(|e| format!("Codex OAuth refresh parse error: {e}"))
 }
 
-async fn exchange_id_token_for_api_key(id_token: &str) -> Result<String, String> {
-    let client = reqwest::Client::new();
-    let resp = client
-        .post(TOKEN_URL)
-        .form(&[
-            (
-                "grant_type",
-                "urn:ietf:params:oauth:grant-type:token-exchange",
-            ),
-            ("client_id", CODEX_CLIENT_ID),
-            ("requested_token", "openai-api-key"),
-            (
-                "subject_token_type",
-                "urn:ietf:params:oauth:token-type:id_token",
-            ),
-            ("subject_token", id_token),
-        ])
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        return Err(format!(
-            "Codex OAuth token exchange failed: HTTP {status}: {body}"
-        ));
-    }
-
-    let v: serde_json::Value = resp
-        .json()
-        .await
-        .map_err(|e| format!("Codex OAuth token exchange parse error: {e}"))?;
-
-    let key = v
-        .get("access_token")
-        .and_then(|x| x.as_str())
-        .unwrap_or("")
-        .trim()
-        .to_string();
-    if key.is_empty() {
-        return Err("Codex OAuth token exchange did not return an access_token".into());
-    }
-    Ok(key)
+fn jwt_exp(jwt: &str) -> Option<i64> {
+    let mut parts = jwt.split('.');
+    let (_h, payload_b64, _s) = match (parts.next(), parts.next(), parts.next()) {
+        (Some(h), Some(p), Some(s)) if !h.is_empty() && !p.is_empty() && !s.is_empty() => (h, p, s),
+        _ => return None,
+    };
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload_b64)
+        .ok()?;
+    let v: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    v.get("exp").and_then(|x| x.as_i64())
 }
 
-fn should_refresh(last_refresh: Option<&str>) -> bool {
-    // auth.json uses RFC3339 timestamps like "2026-02-07T10:08:14.853330Z".
-    // If parsing fails, refresh pessimistically.
-    let Some(ts) = last_refresh else {
+fn token_needs_refresh(access_token: &str) -> bool {
+    // Refresh if token expires within the next 5 minutes (or exp missing).
+    let Some(exp) = jwt_exp(access_token) else {
         return true;
     };
-    let Ok(dt) = time::OffsetDateTime::parse(ts, &time::format_description::well_known::Rfc3339)
-    else {
-        return true;
-    };
-    let age = time::OffsetDateTime::now_utc() - dt;
-    // Access tokens are typically short-lived; refresh if older than 45 minutes.
-    age > time::Duration::minutes(45)
+    let now = time::OffsetDateTime::now_utc().unix_timestamp();
+    exp <= now.saturating_add(300)
 }
 
-/// Best-effort: derive an OpenAI API key using the Codex "Sign in with ChatGPT" OAuth cache.
-///
-/// This reads `~/.codex/auth.json`, refreshes tokens if they're stale, then performs a token
-/// exchange to obtain an API key string.
-pub async fn openai_api_key_from_codex_oauth() -> Result<String, String> {
+async fn load_fresh_tokens() -> Result<CodexTokens, String> {
     let mut auth = read_codex_auth().ok_or_else(|| {
-        "Codex OAuth not found. Run `codex login` (or sign in with ChatGPT in Codex CLI) first."
-            .to_string()
+        "Codex OAuth not found. Run `codex login` (sign in with ChatGPT) first.".to_string()
     })?;
 
-    if should_refresh(auth.last_refresh.as_deref()) {
+    if auth.tokens.access_token.trim().is_empty() || auth.tokens.refresh_token.trim().is_empty() {
+        return Err("Codex OAuth file is missing tokens".into());
+    }
+
+    if token_needs_refresh(&auth.tokens.access_token) {
         let refreshed = refresh_tokens(&auth.tokens.refresh_token).await?;
         if let Some(at) = refreshed.access_token {
             auth.tokens.access_token = at;
@@ -147,20 +108,19 @@ pub async fn openai_api_key_from_codex_oauth() -> Result<String, String> {
         if let Some(rt) = refreshed.refresh_token {
             auth.tokens.refresh_token = rt;
         }
-        auth.last_refresh = Some(
-            time::OffsetDateTime::now_utc()
-                .format(&time::format_description::well_known::Rfc3339)
-                .unwrap_or_else(|_| "unknown".into()),
-        );
-
-        // Write back so Codex and Lorikeet stay in sync.
-        if let Some(path) = codex_auth_path() {
-            let _ = std::fs::write(
-                &path,
-                serde_json::to_string_pretty(&auth).unwrap_or_default(),
-            );
-        }
     }
 
-    exchange_id_token_for_api_key(&auth.tokens.id_token).await
+    Ok(auth.tokens)
+}
+
+/// Return a Bearer token suitable for calling the Codex ChatGPT backend.
+///
+/// Lorikeet reads `~/.codex/auth.json` created by `codex login`, refreshes if needed,
+/// and returns the `access_token`. We do **not** write back to `auth.json`.
+pub async fn codex_chatgpt_access_token() -> Result<String, String> {
+    let tokens = load_fresh_tokens().await?;
+    if tokens.access_token.trim().is_empty() {
+        return Err("Codex OAuth access_token is empty".into());
+    }
+    Ok(tokens.access_token)
 }

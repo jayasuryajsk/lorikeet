@@ -1274,6 +1274,13 @@ fn render_context_sidebar(frame: &mut Frame, app: &mut App, area: Rect, ui_theme
         Span::raw(truncate_to_width(&app.model, width.saturating_sub(7))),
     ]));
     lines.push(Line::from(vec![
+        Span::styled("Provider: ", pal.meta()),
+        Span::raw(truncate_to_width(
+            app.llm_provider_name(),
+            width.saturating_sub(10),
+        )),
+    ]));
+    lines.push(Line::from(vec![
         Span::styled("Mode: ", pal.meta()),
         Span::raw(if app.plan_mode { "plan" } else { "auto" }),
     ]));

@@ -14,6 +14,7 @@ pub struct AppConfig {
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct GeneralConfig {
+    pub provider: Option<String>,
     pub model: Option<String>,
     pub split_ratio: Option<u16>,
     pub auto_index: Option<bool>,
