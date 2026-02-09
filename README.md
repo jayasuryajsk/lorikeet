@@ -31,12 +31,11 @@ cargo install --path . --force
 
 ## API Key Setup
 
-Lorikeet reads keys in this order:
+Lorikeet supports multiple providers:
 
-1. Project-local `.env` (via `dotenvy`)
-2. `~/.lorikeet/.env` (recommended for global installs)
-3. Shell env vars
-4. **Codex OAuth cache** (`~/.codex/auth.json`) if present (derives an OpenAI API key via token exchange)
+- `openrouter` (API key)
+- `openai` (API key)
+- `codex` (Codex CLI ChatGPT OAuth; no API key)
 
 Create `~/.lorikeet/.env`:
 
@@ -59,6 +58,8 @@ If you’ve logged in to the official Codex CLI using “sign in with ChatGPT”
 codex login
 LORIKEET_PROVIDER=codex lorikeet
 ```
+
+Implementation detail: Lorikeet reads `~/.codex/auth.json`, refreshes tokens if needed, and calls the Codex ChatGPT backend using the OAuth `access_token`. It does **not** mint or store an OpenAI API key.
 
 ## Usage
 
@@ -114,6 +115,7 @@ Example:
 
 ```toml
 [general]
+provider = "openrouter" # openrouter | openai | codex
 model = "openai/gpt-5.2"
 auto_index = true
 resume_last = false
