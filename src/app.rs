@@ -10,7 +10,7 @@ use tokio::sync::mpsc;
 use crate::checkpoints;
 use crate::config::AppConfig;
 use crate::events::AppEvent;
-use crate::llm::{call_llm, ChatMessage};
+use crate::llm::{call_llm, ChatMessage, LlmProvider};
 use crate::memory::MemoryManager;
 use crate::sandbox::SandboxPolicy;
 use crate::semantic_search::{index_dir_for_workspace, SearchConfig, SemanticSearch};
@@ -355,6 +355,7 @@ pub struct App {
     pub command_suggest_selected: usize,
     event_tx: mpsc::UnboundedSender<AppEvent>,
     api_key: String,
+    llm_provider: LlmProvider,
     pub model: String,
     sandbox_policy: Arc<SandboxPolicy>,
     pub memory: Arc<MemoryManager>,
@@ -438,6 +439,7 @@ pub struct App {
 impl App {
     pub fn new(
         event_tx: mpsc::UnboundedSender<AppEvent>,
+        llm_provider: LlmProvider,
         api_key: String,
         sandbox_policy: Arc<SandboxPolicy>,
         config: AppConfig,
@@ -491,6 +493,7 @@ impl App {
             command_suggest_selected: 0,
             event_tx,
             api_key,
+            llm_provider,
             model,
             sandbox_policy,
             memory,
@@ -927,6 +930,7 @@ impl App {
 
         let tx = self.event_tx.clone();
         let api_key = self.api_key.clone();
+        let llm_provider = self.llm_provider;
         let model = self.model.clone();
         let memory = self.memory.clone();
 
@@ -988,7 +992,15 @@ impl App {
                 });
             }
 
-            call_llm(tx, api_key, model, chat_messages, tools_enabled).await;
+            call_llm(
+                tx,
+                llm_provider,
+                api_key,
+                model,
+                chat_messages,
+                tools_enabled,
+            )
+            .await;
         });
     }
 
@@ -2581,11 +2593,12 @@ impl App {
                         .and_then(|m| m.extraction_model.clone())
                         .unwrap_or_else(|| self.model.clone());
                     let api_key = self.api_key.clone();
+                    let provider = self.llm_provider;
                     let memory = self.memory.clone();
 
                     tokio::spawn(async move {
                         let _ = memory
-                            .llm_extract_and_save(api_key, extraction_model, summary)
+                            .llm_extract_and_save(provider, api_key, extraction_model, summary)
                             .await;
                     });
                 }
@@ -3777,7 +3790,15 @@ mod tests {
             ));
             let memory = Arc::new(MemoryManager::init(&tmp).await.unwrap());
 
-            let mut app = App::new(tx, "k".into(), policy.clone(), config, tmp.clone(), memory);
+            let mut app = App::new(
+                tx,
+                LlmProvider::OpenRouter,
+                "k".into(),
+                policy.clone(),
+                config,
+                tmp.clone(),
+                memory,
+            );
             app.current_turn_id = 1;
 
             app.handle_event(AppEvent::ToolStart(crate::events::ToolStartEvent {
@@ -3826,7 +3847,15 @@ mod tests {
                 crate::tools::TOOL_NAMES,
             ));
             let memory = Arc::new(MemoryManager::init(&tmp).await.unwrap());
-            let mut app = App::new(tx, "k".into(), policy, config, tmp, memory);
+            let mut app = App::new(
+                tx,
+                LlmProvider::OpenRouter,
+                "k".into(),
+                policy,
+                config,
+                tmp,
+                memory,
+            );
 
             assert!(!app.plan_mode);
             app.handle_event(AppEvent::Input(KeyEvent::new(
@@ -3870,7 +3899,15 @@ mod tests {
                 crate::tools::TOOL_NAMES,
             ));
             let memory = Arc::new(MemoryManager::init(&tmp).await.unwrap());
-            let mut app = App::new(tx, "k".into(), policy, config, tmp, memory);
+            let mut app = App::new(
+                tx,
+                LlmProvider::OpenRouter,
+                "k".into(),
+                policy,
+                config,
+                tmp,
+                memory,
+            );
 
             app.plan_mode = true;
             app.prepare_go();

@@ -7,6 +7,13 @@ use crate::types::{ToolCallFunction, ToolCallMessage};
 
 pub const MODEL: &str = "z-ai/glm-4.7-flash";
 const OPENROUTER_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
+const OPENAI_URL: &str = "https://api.openai.com/v1/chat/completions";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LlmProvider {
+    OpenRouter,
+    OpenAI,
+}
 
 #[derive(Debug, Serialize)]
 struct ChatRequest {
@@ -396,6 +403,7 @@ fn get_tools() -> Vec<Tool> {
 
 pub async fn call_llm(
     tx: mpsc::UnboundedSender<AppEvent>,
+    provider: LlmProvider,
     api_key: String,
     model: String,
     messages: Vec<ChatMessage>,
@@ -414,15 +422,25 @@ pub async fn call_llm(
         },
     };
 
-    let response = client
-        .post(OPENROUTER_URL)
+    let url = match provider {
+        LlmProvider::OpenRouter => OPENROUTER_URL,
+        LlmProvider::OpenAI => OPENAI_URL,
+    };
+
+    let mut req = client
+        .post(url)
         .header("Authorization", format!("Bearer {}", api_key))
         .header("Content-Type", "application/json")
-        .header("HTTP-Referer", "https://github.com/agent-x")
-        .header("X-Title", "Lorikeet")
-        .json(&request)
-        .send()
-        .await;
+        .json(&request);
+
+    // OpenRouter recommends these headers; OpenAI ignores unknown headers.
+    if provider == LlmProvider::OpenRouter {
+        req = req
+            .header("HTTP-Referer", "https://github.com/jayasuryajsk/lorikeet")
+            .header("X-Title", "Lorikeet");
+    }
+
+    let response = req.send().await;
 
     let response = match response {
         Ok(r) => r,
@@ -587,6 +605,7 @@ struct ChatResponseMessage {
 
 /// Non-streaming helper for one-shot calls (e.g., memory extraction).
 pub async fn call_llm_nonstream(
+    provider: LlmProvider,
     api_key: String,
     model: String,
     messages: Vec<ChatMessage>,
@@ -600,16 +619,24 @@ pub async fn call_llm_nonstream(
         tools: None,
     };
 
-    let response = client
-        .post(OPENROUTER_URL)
+    let url = match provider {
+        LlmProvider::OpenRouter => OPENROUTER_URL,
+        LlmProvider::OpenAI => OPENAI_URL,
+    };
+
+    let mut req = client
+        .post(url)
         .header("Authorization", format!("Bearer {}", api_key))
         .header("Content-Type", "application/json")
-        .header("HTTP-Referer", "https://github.com/agent-x")
-        .header("X-Title", "Lorikeet")
-        .json(&request)
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
+        .json(&request);
+
+    if provider == LlmProvider::OpenRouter {
+        req = req
+            .header("HTTP-Referer", "https://github.com/jayasuryajsk/lorikeet")
+            .header("X-Title", "Lorikeet");
+    }
+
+    let response = req.send().await.map_err(|e| e.to_string())?;
 
     if !response.status().is_success() {
         let status = response.status();

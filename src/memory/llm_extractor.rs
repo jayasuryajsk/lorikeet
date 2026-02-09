@@ -1,6 +1,6 @@
 use serde::Deserialize;
 
-use crate::llm::{call_llm_nonstream, ChatMessage};
+use crate::llm::{call_llm_nonstream, ChatMessage, LlmProvider};
 use crate::memory::types::MemoryType;
 
 #[derive(Debug, Clone)]
@@ -61,6 +61,7 @@ Schema:
 "#;
 
 pub async fn extract_memories_from_turn(
+    provider: LlmProvider,
     api_key: String,
     model: String,
     turn_summary: String,
@@ -85,7 +86,7 @@ pub async fn extract_memories_from_turn(
         },
     ];
 
-    let raw = call_llm_nonstream(api_key, model, messages)
+    let raw = call_llm_nonstream(provider, api_key, model, messages)
         .await
         .map_err(|e| anyhow::anyhow!(e))?;
 

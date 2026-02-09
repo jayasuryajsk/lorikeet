@@ -36,6 +36,7 @@ Lorikeet reads keys in this order:
 1. Project-local `.env` (via `dotenvy`)
 2. `~/.lorikeet/.env` (recommended for global installs)
 3. Shell env vars
+4. **Codex OAuth cache** (`~/.codex/auth.json`) if present (derives an OpenAI API key via token exchange)
 
 Create `~/.lorikeet/.env`:
 
@@ -48,6 +49,16 @@ Env vars:
 
 - `OPENROUTER_API_KEY` (preferred)
 - `OPENAI_API_KEY` (fallback)
+- `LORIKEET_PROVIDER=openrouter|openai|codex` (optional override)
+
+### Codex OAuth (ChatGPT login)
+
+If you’ve logged in to the official Codex CLI using “sign in with ChatGPT”, Lorikeet can reuse that login to run with your Codex/ChatGPT subscription:
+
+```bash
+codex login
+LORIKEET_PROVIDER=codex lorikeet
+```
 
 ## Usage
 
@@ -142,4 +153,3 @@ PRs welcome. If you’re changing agent behavior, include:
 ## License
 
 No license file yet. Add one before promoting beyond alpha.
-

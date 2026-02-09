@@ -14,6 +14,7 @@ use tokio::sync::mpsc;
 
 mod app;
 mod checkpoints;
+mod codex_oauth;
 mod config;
 mod events;
 mod llm;
@@ -38,7 +39,9 @@ use semantic_search::{index_dir_for_workspace, SearchConfig, SemanticSearch};
 use tools::TOOL_NAMES;
 use ui::ui;
 
-fn load_api_key() -> Result<String, String> {
+use llm::LlmProvider;
+
+async fn load_llm_credentials() -> Result<(LlmProvider, String), String> {
     // Try project-local .env first.
     let _ = dotenvy::dotenv();
 
@@ -50,11 +53,64 @@ fn load_api_key() -> Result<String, String> {
         }
     }
 
-    std::env::var("OPENROUTER_API_KEY")
-        .or_else(|_| std::env::var("OPENAI_API_KEY"))
-        .map_err(|_| {
-            "OPENROUTER_API_KEY not set. Set it in your shell env, or create ~/.lorikeet/.env with OPENROUTER_API_KEY=...".to_string()
-        })
+    let preferred = std::env::var("LORIKEET_PROVIDER")
+        .ok()
+        .map(|s| s.to_lowercase());
+
+    let try_openrouter = || -> Option<(LlmProvider, String)> {
+        std::env::var("OPENROUTER_API_KEY")
+            .ok()
+            .map(|k| k.trim().to_string())
+            .filter(|k| !k.is_empty())
+            .map(|k| (LlmProvider::OpenRouter, k))
+    };
+
+    let try_openai = || -> Option<(LlmProvider, String)> {
+        std::env::var("OPENAI_API_KEY")
+            .ok()
+            .map(|k| k.trim().to_string())
+            .filter(|k| !k.is_empty())
+            .map(|k| (LlmProvider::OpenAI, k))
+    };
+
+    let try_codex = || async {
+        let k = codex_oauth::openai_api_key_from_codex_oauth().await?;
+        if k.trim().is_empty() {
+            return Err("Codex OAuth present but returned an empty API key".to_string());
+        }
+        Ok((LlmProvider::OpenAI, k))
+    };
+
+    match preferred.as_deref() {
+        Some("openrouter") => {
+            if let Some(v) = try_openrouter() {
+                return Ok(v);
+            }
+            return Err("LORIKEET_PROVIDER=openrouter but OPENROUTER_API_KEY is not set".into());
+        }
+        Some("openai") => {
+            if let Some(v) = try_openai() {
+                return Ok(v);
+            }
+            return Err("LORIKEET_PROVIDER=openai but OPENAI_API_KEY is not set".into());
+        }
+        Some("codex") | Some("codex_oauth") => return try_codex().await,
+        _ => {}
+    }
+
+    if let Some(v) = try_openrouter() {
+        return Ok(v);
+    }
+    if let Some(v) = try_openai() {
+        return Ok(v);
+    }
+    match try_codex().await {
+        Ok(v) => Ok(v),
+        Err(e) => Err(format!(
+            "No API key found.\n\nSet OPENROUTER_API_KEY or OPENAI_API_KEY, or sign in via Codex CLI.\n\nOptional: set LORIKEET_PROVIDER=openrouter|openai|codex\n\nDetails: {}",
+            e
+        )),
+    }
 }
 
 #[tokio::main]
@@ -84,14 +140,17 @@ async fn main() -> Result<()> {
             }
         }
     }
-    let api_key = match load_api_key() {
-        Ok(k) => k,
+    let (provider, api_key) = match load_llm_credentials().await {
+        Ok(v) => v,
         Err(msg) => {
             eprintln!("{}", msg);
             eprintln!();
             eprintln!("Examples:");
             eprintln!("  export OPENROUTER_API_KEY=... ");
             eprintln!("  echo 'OPENROUTER_API_KEY=...' > ~/.lorikeet/.env");
+            eprintln!();
+            eprintln!("Codex OAuth:");
+            eprintln!("  codex login   # then run lorikeet (will reuse ~/.codex/auth.json)");
             std::process::exit(1);
         }
     };
@@ -136,6 +195,7 @@ async fn main() -> Result<()> {
 
     let mut app = App::new(
         event_tx,
+        provider,
         api_key,
         sandbox_policy,
         config.clone(),

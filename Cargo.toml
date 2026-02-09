@@ -23,6 +23,7 @@ anyhow = "1"
 url = "2"
 flate2 = "1"
 sha2 = "0.10"
+time = { version = "0.3", features = ["parsing", "formatting"] }
 
 # Semantic search
 fastembed = "4"

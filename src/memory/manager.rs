@@ -253,11 +253,13 @@ impl MemoryManager {
     /// capture decisions and preferences that rule-based extraction misses.
     pub async fn llm_extract_and_save(
         &self,
+        provider: crate::llm::LlmProvider,
         api_key: String,
         model: String,
         turn_summary: String,
     ) -> usize {
         let candidates = match crate::memory::llm_extractor::extract_memories_from_turn(
+            provider,
             api_key,
             model,
             turn_summary,
