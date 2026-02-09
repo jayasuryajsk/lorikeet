@@ -15,12 +15,14 @@ use crate::memory::MemoryManager;
 use crate::sandbox::SandboxPolicy;
 use crate::semantic_search::{index_dir_for_workspace, SearchConfig, SemanticSearch};
 use crate::session::{replay_into, SessionStore};
+use crate::render_store::{RenderStore, RenderedBlockId};
 use crate::tools::execute_tool;
 use crate::types::ToolCallMessage;
 use crate::verify::detect_suggestions;
 
 #[derive(Debug, Clone)]
 pub struct Message {
+    pub id: u64,
     pub role: Role,
     pub content: String,
     pub reasoning: Option<String>,
@@ -341,8 +343,8 @@ pub struct App {
     pub input: String,
     pub cursor_pos: usize,
     messages: Vec<Message>,
-    pub messages_scroll: usize,
-    pub messages_auto_scroll: bool,
+    pub chat_scroll_rows: usize,
+    pub chat_follow: bool,
     pub tool_outputs: Vec<ToolOutput>,
     pub active_pane: Pane,
     pub should_quit: bool,
@@ -386,6 +388,8 @@ pub struct App {
     // Turn tracking (for memory extraction)
     turn_user_message: Option<String>,
     turn_tool_start_idx: usize,
+    next_message_id: u64,
+    pub render_store: RenderStore,
 
     // Turn tracking (for memory extraction and grouping user messages)
     pub current_turn_id: u64,
@@ -465,6 +469,7 @@ impl App {
             cursor_pos: 0,
             messages: vec![
                 Message {
+                    id: 1,
                     role: Role::System,
                     content: SYSTEM_PROMPT.into(),
                     reasoning: None,
@@ -473,6 +478,7 @@ impl App {
                     local: false,
                 },
                 Message {
+                    id: 2,
                     role: Role::Agent,
                     content: "Lorikeet ready. I can execute commands, read/write files, and help you build things. What would you like to do?".into(),
                     reasoning: None,
@@ -481,8 +487,8 @@ impl App {
                     local: false,
                 },
             ],
-            messages_scroll: 0,
-            messages_auto_scroll: true,
+            chat_scroll_rows: 0,
+            chat_follow: true,
             tool_outputs: vec![],
             active_pane: Pane::Chat,
             should_quit: false,
@@ -522,6 +528,8 @@ impl App {
             themes_cursor: 0,
             turn_user_message: None,
             turn_tool_start_idx: 0,
+            next_message_id: 3,
+            render_store: RenderStore::new(),
             current_turn_id: 0,
             next_tool_group_id: 1,
             last_tool_group_id: None,
@@ -554,6 +562,34 @@ impl App {
         }
     }
 
+    fn alloc_message_id(&mut self) -> u64 {
+        let id = self.next_message_id;
+        self.next_message_id = self.next_message_id.saturating_add(1);
+        id
+    }
+
+    fn push_message(&mut self, mut msg: Message) {
+        if msg.id == 0 {
+            msg.id = self.alloc_message_id();
+        }
+        let id = msg.id;
+        self.messages.push(msg);
+        self.render_store.mark_dirty(RenderedBlockId::Message(id));
+        self.render_store.mark_dirty(RenderedBlockId::Spacer(id));
+    }
+
+    fn reassign_message_ids_if_needed(&mut self) {
+        // Session replay doesn't persist ids; assign sequentially for caching/virtualization.
+        let mut next = 1u64;
+        for m in &mut self.messages {
+            if m.id == 0 {
+                m.id = next;
+            }
+            next = next.max(m.id.saturating_add(1));
+        }
+        self.next_message_id = next;
+    }
+
     pub fn init_session(&mut self, resume: bool) {
         // Decide whether to resume
         if resume {
@@ -572,6 +608,8 @@ impl App {
                     self.next_tool_group_id = 1;
                     self.recent_files.clear();
                     replay_into(&events, &mut self.messages, &mut self.tool_outputs);
+                    self.reassign_message_ids_if_needed();
+                    self.render_store = RenderStore::new();
 
                     // Rebuild call_id -> group_id mapping from persisted tool events (best-effort).
                     for t in &self.tool_outputs {
@@ -640,6 +678,7 @@ impl App {
                         self.messages.insert(
                             0,
                             Message {
+                                id: 0,
                                 role: Role::System,
                                 content: SYSTEM_PROMPT.into(),
                                 reasoning: None,
@@ -656,7 +695,8 @@ impl App {
                         .ok()
                         .and_then(|v| v.into_iter().next());
                     // User-visible notice.
-                    self.messages.push(Message {
+                    self.push_message(Message {
+                        id: 0,
                         role: Role::Agent,
                         content: "(resumed previous session)".into(),
                         reasoning: None,
@@ -759,7 +799,8 @@ impl App {
 
             // First, try exact command.
             if self.maybe_handle_command(&user_trimmed) {
-                self.messages.push(Message {
+                self.push_message(Message {
+                    id: 0,
                     role: Role::User,
                     content: user_trimmed.clone(),
                     reasoning: None,
@@ -782,7 +823,8 @@ impl App {
                     .command_suggest_selected
                     .min(suggestions.len().saturating_sub(1));
                 let resolved = suggestions[idx].0.clone();
-                self.messages.push(Message {
+                self.push_message(Message {
+                    id: 0,
                     role: Role::User,
                     content: resolved.clone(),
                     reasoning: None,
@@ -800,7 +842,8 @@ impl App {
             }
 
             // Unknown command, show help.
-            self.messages.push(Message {
+            self.push_message(Message {
+                id: 0,
                 role: Role::User,
                 content: user_trimmed.clone(),
                 reasoning: None,
@@ -813,7 +856,8 @@ impl App {
             }
 
             let msg = "Unknown command. Try: /plan, /auto, /go, /settings, /themes, /verify, /checkpoint, /checkpoints, /restore, /checkpoint-diff, /new, /resume, /sessions, /help".to_string();
-            self.messages.push(Message {
+            self.push_message(Message {
+                id: 0,
                 role: Role::Agent,
                 content: msg,
                 reasoning: None,
@@ -838,7 +882,8 @@ impl App {
         self.turn_tool_start_idx = self.tool_outputs.len();
         self.turn_user_message = Some(user_msg_for_mem.clone());
 
-        self.messages.push(Message {
+        self.push_message(Message {
+            id: 0,
             role: Role::User,
             content: user_msg,
             reasoning: None,
@@ -894,7 +939,7 @@ impl App {
         self.processing_start = Some(Instant::now());
         self.current_response.clear();
         self.current_reasoning.clear();
-        self.messages_auto_scroll = true;
+        self.chat_follow = true;
 
         let user_message = self
             .messages
@@ -1275,7 +1320,7 @@ impl App {
     }
 
     fn scroll_messages_to_bottom(&mut self) {
-        self.messages_auto_scroll = true;
+        self.chat_follow = true;
     }
 
     fn handle_key(&mut self, key: KeyEvent) {
@@ -1300,6 +1345,44 @@ impl App {
                 }
                 KeyCode::Right => {
                     self.adjust_split_ratio(2);
+                    return;
+                }
+                KeyCode::Char('e') => {
+                    if self.active_pane == Pane::Chat {
+                        if let Some(group_id) = self.last_tool_group_id {
+                            let has_trace =
+                                self.tool_outputs.iter().any(|t| t.group_id == group_id);
+                            if has_trace {
+                                let cur = self
+                                    .tool_trace_expanded
+                                    .get(&group_id)
+                                    .copied()
+                                    .unwrap_or(false);
+                                self.tool_trace_expanded.insert(group_id, !cur);
+                                self.render_store
+                                    .mark_dirty(RenderedBlockId::ToolGroup(group_id));
+                            }
+                        }
+                    }
+                    return;
+                }
+                KeyCode::Char('i') => {
+                    if self.active_pane == Pane::Chat {
+                        if let Some(group_id) = self.last_tool_group_id {
+                            let has_trace =
+                                self.tool_outputs.iter().any(|t| t.group_id == group_id);
+                            if has_trace {
+                                let cur = self
+                                    .tool_trace_show_details
+                                    .get(&group_id)
+                                    .copied()
+                                    .unwrap_or(true);
+                                self.tool_trace_show_details.insert(group_id, !cur);
+                                self.render_store
+                                    .mark_dirty(RenderedBlockId::ToolGroup(group_id));
+                            }
+                        }
+                    }
                     return;
                 }
                 _ => {}
@@ -1354,8 +1437,8 @@ impl App {
                 if key.modifiers.contains(KeyModifiers::SHIFT) {
                     match self.active_pane {
                         Pane::Chat => {
-                            self.messages_auto_scroll = false;
-                            self.messages_scroll = self.messages_scroll.saturating_sub(1);
+                            self.chat_follow = false;
+                            self.chat_scroll_rows = self.chat_scroll_rows.saturating_sub(1);
                         }
                         Pane::Context => {}
                     }
@@ -1377,8 +1460,7 @@ impl App {
                 if key.modifiers.contains(KeyModifiers::SHIFT) {
                     match self.active_pane {
                         Pane::Chat => {
-                            self.messages_scroll = self.messages_scroll.saturating_add(1);
-                            // Re-enable auto-scroll if at bottom (will be clamped in UI)
+                            self.chat_scroll_rows = self.chat_scroll_rows.saturating_add(1);
                         }
                         Pane::Context => {}
                     }
@@ -1386,53 +1468,17 @@ impl App {
             }
             KeyCode::PageUp => match self.active_pane {
                 Pane::Chat => {
-                    self.messages_auto_scroll = false;
-                    self.messages_scroll = self.messages_scroll.saturating_sub(20);
+                    self.chat_follow = false;
+                    self.chat_scroll_rows = self.chat_scroll_rows.saturating_sub(20);
                 }
                 Pane::Context => {}
             },
             KeyCode::PageDown => match self.active_pane {
                 Pane::Chat => {
-                    self.messages_scroll = self.messages_scroll.saturating_add(20);
+                    self.chat_scroll_rows = self.chat_scroll_rows.saturating_add(20);
                 }
                 Pane::Context => {}
             },
-            KeyCode::Char('e') => {
-                if key.modifiers.contains(KeyModifiers::CONTROL) && self.active_pane == Pane::Chat {
-                    if let Some(group_id) = self.last_tool_group_id {
-                        let has_trace = self.tool_outputs.iter().any(|t| t.group_id == group_id);
-                        if has_trace {
-                            let cur = self
-                                .tool_trace_expanded
-                                .get(&group_id)
-                                .copied()
-                                .unwrap_or(false);
-                            self.tool_trace_expanded.insert(group_id, !cur);
-                        }
-                    }
-                    return;
-                }
-                self.input.insert(self.cursor_pos, 'e');
-                self.cursor_pos += 1;
-            }
-            KeyCode::Char('i') => {
-                if key.modifiers.contains(KeyModifiers::CONTROL) && self.active_pane == Pane::Chat {
-                    if let Some(group_id) = self.last_tool_group_id {
-                        let has_trace = self.tool_outputs.iter().any(|t| t.group_id == group_id);
-                        if has_trace {
-                            let cur = self
-                                .tool_trace_show_details
-                                .get(&group_id)
-                                .copied()
-                                .unwrap_or(true);
-                            self.tool_trace_show_details.insert(group_id, !cur);
-                        }
-                    }
-                    return;
-                }
-                self.input.insert(self.cursor_pos, 'i');
-                self.cursor_pos += 1;
-            }
             KeyCode::Char(c) => {
                 self.input.insert(self.cursor_pos, c);
                 self.cursor_pos += 1;
@@ -1749,7 +1795,8 @@ impl App {
                         self.settings_draft.general = Some(general);
                     }
                     Err(e) => {
-                        self.messages.push(Message {
+                        self.push_message(Message {
+                            id: 0,
                             role: Role::Agent,
                             content: format!("[Provider switch failed: {}]", e),
                             reasoning: None,
@@ -2188,7 +2235,8 @@ impl App {
                 checkpoints::load_checkpoint_meta(&self.workspace_root, &arg).ok()
             };
             let Some(meta) = target else {
-                self.messages.push(Message {
+                self.push_message(Message {
+                    id: 0,
                     role: Role::Agent,
                     content: "No checkpoint found. Usage: /checkpoint-diff <id|latest>".into(),
                     reasoning: None,
@@ -2204,7 +2252,8 @@ impl App {
             };
             match checkpoints::checkpoint_diff_summary(&self.workspace_root, &meta) {
                 Ok(s) => {
-                    self.messages.push(Message {
+                    self.push_message(Message {
+                        id: 0,
                         role: Role::Agent,
                         content: s,
                         reasoning: None,
@@ -2218,7 +2267,8 @@ impl App {
                     }
                 }
                 Err(e) => {
-                    self.messages.push(Message {
+                    self.push_message(Message {
+                        id: 0,
                         role: Role::Agent,
                         content: format!("Checkpoint diff error: {}", e),
                         reasoning: None,
@@ -2247,7 +2297,8 @@ impl App {
             match checkpoints::create_checkpoint(&self.workspace_root, store, name) {
                 Ok(meta) => {
                     self.last_checkpoint = Some(meta.clone());
-                    self.messages.push(Message {
+                    self.push_message(Message {
+                        id: 0,
                         role: Role::Agent,
                         content: format!("Checkpoint created: {} ({:?})", meta.id, meta.backend),
                         reasoning: None,
@@ -2261,7 +2312,8 @@ impl App {
                     }
                 }
                 Err(e) => {
-                    self.messages.push(Message {
+                    self.push_message(Message {
+                        id: 0,
                         role: Role::Agent,
                         content: format!("Checkpoint error: {}", e),
                         reasoning: None,
@@ -2277,7 +2329,8 @@ impl App {
         if trimmed == "/checkpoints" {
             let metas = checkpoints::list_checkpoints(&self.workspace_root, 10).unwrap_or_default();
             if metas.is_empty() {
-                self.messages.push(Message {
+                self.push_message(Message {
+                    id: 0,
                     role: Role::Agent,
                     content: "No checkpoints yet. Use /checkpoint".into(),
                     reasoning: None,
@@ -2302,7 +2355,8 @@ impl App {
                 };
                 out.push_str(&format!("- {} ({:?}){}\n", m.id, m.backend, nm));
             }
-            self.messages.push(Message {
+            self.push_message(Message {
+                id: 0,
                 role: Role::Agent,
                 content: out.trim_end().to_string(),
                 reasoning: None,
@@ -2323,7 +2377,8 @@ impl App {
                     .iter()
                     .any(|t| t.status == ToolStatus::Running)
             {
-                self.messages.push(Message {
+                self.push_message(Message {
+                    id: 0,
                     role: Role::Agent,
                     content: "Cannot restore while agent/tools are running.".into(),
                     reasoning: None,
@@ -2351,7 +2406,8 @@ impl App {
                 checkpoints::load_checkpoint_meta(&self.workspace_root, arg).ok()
             };
             let Some(meta) = meta else {
-                self.messages.push(Message {
+                self.push_message(Message {
+                    id: 0,
                     role: Role::Agent,
                     content: "No checkpoint found. Usage: /restore <id|latest>".into(),
                     reasoning: None,
@@ -2364,7 +2420,8 @@ impl App {
             };
 
             if let Err(e) = checkpoints::restore_checkpoint(&self.workspace_root, store, &meta) {
-                self.messages.push(Message {
+                self.push_message(Message {
+                    id: 0,
                     role: Role::Agent,
                     content: format!("Restore error: {}", e),
                     reasoning: None,
@@ -2377,7 +2434,8 @@ impl App {
             }
 
             if let Err(e) = checkpoints::truncate_session_to(store, meta.session_event_count) {
-                self.messages.push(Message {
+                self.push_message(Message {
+                    id: 0,
                     role: Role::Agent,
                     content: format!("Session rewind error: {}", e),
                     reasoning: None,
@@ -2392,7 +2450,8 @@ impl App {
             // Reload the rewound session so UI matches the restored timeline.
             self.init_session(true);
             self.last_checkpoint = Some(meta.clone());
-            self.messages.push(Message {
+            self.push_message(Message {
+                id: 0,
                 role: Role::Agent,
                 content: format!("(restored checkpoint {})", meta.id),
                 reasoning: None,
@@ -2404,7 +2463,8 @@ impl App {
             return true;
         }
         if matches!(trimmed, "/help" | "/h" | "/?") {
-            self.messages.push(Message {
+            self.push_message(Message {
+                id: 0,
                 role: Role::Agent,
                 content:
                     "Commands: /plan, /auto, /go, /settings (/s), /themes (/t), /verify, /checkpoint, /checkpoints, /restore, /checkpoint-diff, /new, /resume, /sessions"
@@ -2438,7 +2498,8 @@ impl App {
             self.next_tool_group_id = 1;
             self.last_tool_group_id = None;
             self.new_session();
-            self.messages.push(Message {
+            self.push_message(Message {
+                id: 0,
                 role: Role::Agent,
                 content: "(new session)".into(),
                 reasoning: None,
@@ -2459,7 +2520,8 @@ impl App {
         if trimmed == "/verify" {
             self.refresh_verify_suggestions();
             if self.verify_suggestions.is_empty() {
-                self.messages.push(Message {
+                self.push_message(Message {
+                    id: 0,
                     role: Role::Agent,
                     content: "No verify suggestions for this workspace yet.".into(),
                     reasoning: None,
@@ -2486,7 +2548,8 @@ impl App {
             self.next_tool_group_id = self.next_tool_group_id.saturating_add(1);
             self.last_tool_group_id = Some(group_id);
 
-            self.messages.push(Message {
+            self.push_message(Message {
+                id: 0,
                 role: Role::Agent,
                 content: format!("Running verify: {}", cmds),
                 reasoning: None,
@@ -2554,7 +2617,8 @@ impl App {
             } else {
                 "No session store initialized".to_string()
             };
-            self.messages.push(Message {
+            self.push_message(Message {
+                id: 0,
                 role: Role::Agent,
                 content: msg,
                 reasoning: None,
@@ -2649,14 +2713,14 @@ impl App {
         match mouse.kind {
             MouseEventKind::ScrollUp => {
                 if in_chat {
-                    self.messages_auto_scroll = false;
-                    self.messages_scroll = self.messages_scroll.saturating_sub(1);
+                    self.chat_follow = false;
+                    self.chat_scroll_rows = self.chat_scroll_rows.saturating_sub(1);
                 } else if in_context {
                 }
             }
             MouseEventKind::ScrollDown => {
                 if in_chat {
-                    self.messages_scroll = self.messages_scroll.saturating_add(1);
+                    self.chat_scroll_rows = self.chat_scroll_rows.saturating_add(1);
                 } else if in_context {
                 }
             }
@@ -2732,7 +2796,8 @@ impl App {
                 }
 
                 if !response.is_empty() || !reasoning.is_empty() {
-                    self.messages.push(Message {
+                    self.push_message(Message {
+                        id: 0,
                         role: Role::Agent,
                         content: response,
                         reasoning: if reasoning.is_empty() {
@@ -2822,7 +2887,8 @@ impl App {
                     self.tool_group_by_call_id.insert(tc.id.clone(), group_id);
                 }
 
-                self.messages.push(Message {
+                self.push_message(Message {
+                    id: 0,
                     role: Role::Agent,
                     content: response,
                     reasoning: if reasoning.is_empty() {
@@ -3087,7 +3153,8 @@ impl App {
             AppEvent::ToolResultsReady(results) => {
                 // Add tool result messages
                 for (tool_call_id, result) in results {
-                    self.messages.push(Message {
+                    self.push_message(Message {
+                        id: 0,
                         role: Role::Tool,
                         content: result,
                         reasoning: Some(tool_call_id), // Store tool_call_id here
@@ -3100,7 +3167,8 @@ impl App {
                 // If we detected an infinite tool retry loop, stop here and require user input.
                 if let Some((turn_id, msg)) = self.tool_loop_abort.take() {
                     if turn_id == self.current_turn_id {
-                        self.messages.push(Message {
+                        self.push_message(Message {
+                            id: 0,
                             role: Role::Agent,
                             content: msg,
                             reasoning: None,
@@ -3119,7 +3187,8 @@ impl App {
                 self.start_llm_call();
             }
             AppEvent::AgentError(err) => {
-                self.messages.push(Message {
+                self.push_message(Message {
+                    id: 0,
                     role: Role::Agent,
                     content: format!("[Error: {}]", err),
                     reasoning: None,
@@ -3161,12 +3230,18 @@ impl App {
                 if group_id > 0 {
                     self.tool_trace_expanded.entry(group_id).or_insert(false);
                     self.tool_trace_show_details.entry(group_id).or_insert(true);
+                    self.render_store
+                        .mark_dirty(RenderedBlockId::ToolGroup(group_id));
                 }
             }
             AppEvent::ToolOutput(ev) => {
                 if let Some(&idx) = self.tool_index_by_call_id.get(&ev.call_id) {
                     if let Some(t) = self.tool_outputs.get_mut(idx) {
                         t.append_chunk(ev.chunk);
+                        if t.group_id > 0 {
+                            self.render_store
+                                .mark_dirty(RenderedBlockId::ToolGroup(t.group_id));
+                        }
                     }
                 }
             }
@@ -3186,6 +3261,10 @@ impl App {
                         t.turn_id,
                         t.group_id,
                     ));
+                    if t.group_id > 0 {
+                        self.render_store
+                            .mark_dirty(RenderedBlockId::ToolGroup(t.group_id));
+                    }
 
                     // Persist completed tool output (best-effort).
                     let tool_snapshot = t.clone();

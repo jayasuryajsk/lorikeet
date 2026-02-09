@@ -230,6 +230,7 @@ pub fn replay_into(
                     turn_id = turn_id.saturating_add(1);
                 }
                 messages.push(Message {
+                    id: 0,
                     role: string_to_role(role),
                     content: content.clone(),
                     reasoning: reasoning.clone(),

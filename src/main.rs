@@ -21,6 +21,7 @@ mod llm;
 mod lsp;
 mod markdown;
 mod memory;
+mod render_store;
 mod sandbox;
 mod semantic_search;
 mod session;

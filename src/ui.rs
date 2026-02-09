@@ -10,7 +10,7 @@ use ratatui::{
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::{
-    App, IndexingStatus, Pane, PlanFocus, PlanQuestionKind, Role, ToolOutput, ToolStatus,
+    App, IndexingStatus, Pane, PlanFocus, PlanQuestionKind, ToolOutput, ToolStatus,
 };
 use crate::markdown;
 use crate::theme;
@@ -55,204 +55,48 @@ pub fn ui(frame: &mut Frame, app: &mut App) {
 
     // Advance tool spinner (used by inline tool rendering)
     app.tool_spinner_frame = (app.tool_spinner_frame + 1) % TOOL_SPINNER_FRAMES.len();
-    let tool_spinner = TOOL_SPINNER_FRAMES[app.tool_spinner_frame];
+    let _tool_spinner = TOOL_SPINNER_FRAMES[app.tool_spinner_frame];
 
     // Advance indexing spinner (used by context sidebar)
     app.indexing_spinner_frame = (app.indexing_spinner_frame + 1) % INDEXING_SPINNER.len();
 
-    // Render messages with markdown + inline tools
-    let mut all_lines: Vec<Line> = Vec::new();
-
-    // Copy the messages so we can mutably borrow `app` while rendering tools.
-    let display_messages: Vec<_> = app.display_messages().cloned().collect();
-    for msg in display_messages {
-        let (prefix, theme) = match msg.role {
-            Role::User => ("▶ ", theme::user_markdown_theme(&ui_theme)),
-            Role::Agent => ("● ", ui_theme.markdown),
-            Role::System => ("◆ ", ui_theme.markdown),
-            Role::Tool => ("⚙ ", ui_theme.markdown),
-        };
-
-        // Add prefix line
-        let prefix_style = match msg.role {
-            Role::User => Style::default().fg(Color::Cyan).bold(),
-            Role::Agent => Style::default().fg(pal.accent).bold(),
-            Role::System => Style::default().fg(pal.warn).bold(),
-            Role::Tool => Style::default().fg(pal.accent).bold(),
-        };
-
-        // Show reasoning as ghost text (if any) - wrap long lines
-        if let Some(reasoning) = &msg.reasoning {
-            for line in reasoning.lines() {
-                if line.trim().is_empty() {
-                    continue;
-                }
-                // Wrap long lines instead of truncating
-                let chars: Vec<char> = line.chars().collect();
-                let wrap_width = chat_width.saturating_sub(2);
-                for chunk in chars.chunks(wrap_width) {
-                    let text: String = chunk.iter().collect();
-                    all_lines.push(Line::from(Span::styled(text, pal.ghost())));
-                }
-            }
-        }
-
-        let md_lines = markdown::render(
-            &msg.content,
-            theme,
-            ui_theme.syntax,
-            chat_width.saturating_sub(2),
-        );
-
-        // Filter out excessive empty lines
-        let mut prev_empty = false;
-        let mut is_first = true;
-        for line in md_lines.into_iter() {
-            // Check if line is effectively empty
-            let line_text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-            let is_empty = line_text.trim().is_empty();
-
-            // Skip consecutive empty lines
-            if is_empty {
-                if prev_empty {
-                    continue;
-                }
-                prev_empty = true;
-            } else {
-                prev_empty = false;
-            }
-
-            if is_first {
-                is_first = false;
-                let mut first_spans = vec![Span::styled(prefix.to_string(), prefix_style)];
-                first_spans.extend(line.spans);
-                all_lines.push(Line::from(first_spans));
-            } else {
-                let mut indented = vec![Span::raw("  ")];
-                indented.extend(line.spans);
-                all_lines.push(Line::from(indented));
-            }
-        }
-
-        // Remove trailing empty line if present, then add single spacing
-        if let Some(last) = all_lines.last() {
-            let last_text: String = last.spans.iter().map(|s| s.content.as_ref()).collect();
-            if last_text.trim().is_empty() {
-                all_lines.pop();
-            }
-        }
-        all_lines.push(Line::from("")); // single line spacing between messages
-
-        // Tool trace belongs to the assistant tool-call phase.
-        // Render it immediately after the assistant message that initiated the tool group.
-        if msg.role == Role::Agent {
-            if let Some(group_id) = msg.tool_group_id {
-                render_tool_group_inline(
-                    &*app,
-                    &ui_theme,
-                    group_id,
-                    tool_spinner,
-                    chat_width,
-                    &mut all_lines,
-                );
-            }
-        }
-    }
-
-    // Show streaming response or loading spinner
     if app.is_processing {
-        // Advance spinner
         app.spinner_frame = (app.spinner_frame + 1) % SPINNER_FRAMES.len();
-        let spinner = SPINNER_FRAMES[app.spinner_frame];
-
-        // Show reasoning tokens as ghost text (if any) - wrap long lines
-        if !app.current_reasoning.is_empty() {
-            for line in app.current_reasoning.lines() {
-                if line.trim().is_empty() {
-                    continue;
-                }
-                let chars: Vec<char> = line.chars().collect();
-                let wrap_width = chat_width.saturating_sub(2);
-                for chunk in chars.chunks(wrap_width) {
-                    let text: String = chunk.iter().collect();
-                    all_lines.push(Line::from(Span::styled(text, pal.ghost())));
-                }
-            }
-        }
-
-        if app.current_response.is_empty() && app.current_reasoning.is_empty() {
-            // Show spinner with elapsed time
-            let elapsed = app
-                .processing_start
-                .map(|t| t.elapsed())
-                .unwrap_or_default();
-            let time_str = if elapsed.as_secs() >= 60 {
-                format!("{}m {}s", elapsed.as_secs() / 60, elapsed.as_secs() % 60)
-            } else if elapsed.as_secs() > 0 {
-                format!(
-                    "{}.{}s",
-                    elapsed.as_secs(),
-                    elapsed.as_millis() % 1000 / 100
-                )
-            } else {
-                format!("{}ms", elapsed.as_millis())
-            };
-            all_lines.push(Line::from(vec![
-                Span::styled(format!("{} ", spinner), Style::default().fg(pal.warn)),
-                Span::styled(time_str, pal.meta()),
-            ]));
-        } else if !app.current_response.is_empty() {
-            // Show streaming content with spinner
-            let theme = ui_theme.markdown;
-            let md_lines = markdown::render(
-                &app.current_response,
-                theme,
-                ui_theme.syntax,
-                chat_width.saturating_sub(4),
-            );
-
-            if let Some(first) = md_lines.first() {
-                let mut first_spans = vec![Span::styled(
-                    format!("{} ", spinner),
-                    Style::default().fg(Color::Yellow),
-                )];
-                first_spans.extend(first.spans.iter().cloned());
-                all_lines.push(Line::from(first_spans));
-            }
-
-            for line in md_lines.into_iter().skip(1) {
-                let mut indented = vec![Span::raw("  ")];
-                indented.extend(line.spans);
-                all_lines.push(Line::from(indented));
-            }
-        } else if !app.current_reasoning.is_empty() {
-            // Has reasoning but no response yet - show spinner
-            all_lines.push(Line::from(vec![Span::styled(
-                format!("{} ", spinner),
-                Style::default().fg(Color::Yellow),
-            )]));
-        }
     }
 
-    // Calculate scroll
-    let total_lines = all_lines.len();
+    // Keep running tool spinners alive without forcing a full transcript rebuild.
+    for gid in app
+        .tool_outputs
+        .iter()
+        .filter(|t| t.status == ToolStatus::Running && t.group_id > 0)
+        .map(|t| t.group_id)
+    {
+        app.render_store
+            .mark_dirty(crate::render_store::RenderedBlockId::ToolGroup(gid));
+    }
+
+    // Cached + virtualized transcript render.
+    let mut store = std::mem::take(&mut app.render_store);
+    store.ensure_up_to_date(&*app, &ui_theme, chat_width);
+    app.render_store = store;
+
+    let total_lines = app.render_store.total_height();
     let visible_height = left_chunks[0].height.saturating_sub(2) as usize; // subtract borders
     let max_scroll = total_lines.saturating_sub(visible_height);
 
-    // Auto-scroll to bottom if enabled
-    if app.messages_auto_scroll {
-        app.messages_scroll = max_scroll;
+    if app.chat_follow {
+        app.chat_scroll_rows = max_scroll;
     } else {
-        // Clamp scroll to valid range
-        app.messages_scroll = app.messages_scroll.min(max_scroll);
+        app.chat_scroll_rows = app.chat_scroll_rows.min(max_scroll);
+    }
+    if app.chat_scroll_rows >= max_scroll.saturating_sub(1) {
+        app.chat_follow = true;
     }
 
-    // Re-enable auto-scroll if we're at the bottom
-    if app.messages_scroll >= max_scroll.saturating_sub(1) {
-        app.messages_auto_scroll = true;
-    }
+    let visible_lines = app
+        .render_store
+        .visible_lines(app.chat_scroll_rows, visible_height);
 
-    // Store chat area for mouse handling
     app.chat_area = left_chunks[0];
 
     let chat_title = if app.active_pane == Pane::Chat {
@@ -268,20 +112,19 @@ pub fn ui(frame: &mut Frame, app: &mut App) {
             format!("  Lorikeet · {} ", app.model)
         }
     };
-    let messages_widget = Paragraph::new(all_lines)
+    let messages_widget = Paragraph::new(visible_lines)
         .block(
             Block::default()
                 .borders(Borders::ALL)
                 .border_style(chat_border_style)
                 .title(chat_title),
-        )
-        .scroll((app.messages_scroll as u16, 0));
+        );
     frame.render_widget(messages_widget, left_chunks[0]);
 
     // Chat scrollbar - use max_scroll as content length so thumb reaches bottom
-    let scrollbar_content = if max_scroll > 0 { max_scroll } else { 1 };
+    let scrollbar_content = total_lines.max(1);
     let mut chat_scrollbar_state =
-        ScrollbarState::new(scrollbar_content).position(app.messages_scroll);
+        ScrollbarState::new(scrollbar_content).position(app.chat_scroll_rows);
     let chat_scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
         .begin_symbol(None)
         .end_symbol(None)
@@ -342,6 +185,16 @@ pub fn ui(frame: &mut Frame, app: &mut App) {
     if app.plan_popup_open {
         render_plan_popup(frame, app, &ui_theme);
     }
+}
+
+fn render_vsplit(frame: &mut Frame, area: Rect, style: Style) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    frame.render_widget(
+        Paragraph::new("│".repeat(area.height as usize)).style(style),
+        area,
+    );
 }
 
 fn render_command_suggestions_overlay(
@@ -432,9 +285,10 @@ fn render_indexing_status(status: &IndexingStatus, spinner_frame: usize) -> Stri
 }
 
 fn render_settings_popup(frame: &mut Frame, app: &mut App) {
-    let pal = theme::ui_palette(&app.config, Some(app.workspace_root_path()));
+    let ui_theme = theme::ui_theme(&app.config, Some(app.workspace_root_path()));
+    let pal = ui_theme.palette;
     let area = frame.area();
-    let popup_area = centered_rect(78, 75, area);
+    let popup_area = centered_rect(74, 66, area);
 
     frame.render_widget(Clear, popup_area);
 
@@ -442,121 +296,227 @@ fn render_settings_popup(frame: &mut Frame, app: &mut App) {
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(pal.border_style())
-        .title(Span::styled(
-            " Settings ",
-            Style::default().fg(pal.accent).bold(),
-        ));
+        .title(Line::from(vec![
+            Span::styled(" Settings ", Style::default().fg(pal.accent).bold()),
+            Span::raw(" "),
+            Span::styled("esc", pal.meta()),
+        ]));
     let inner = block.inner(popup_area);
     frame.render_widget(block, popup_area);
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Min(8),
-            Constraint::Length(3),
-            Constraint::Length(1),
-        ])
-        .split(inner);
 
-    let top = Layout::default()
+    let cols = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
             Constraint::Length(18),
-            Constraint::Length(1),
-            Constraint::Min(10),
+            Constraint::Length(30),
+            Constraint::Min(20),
         ])
-        .split(chunks[0]);
+        .split(inner);
 
-    // Categories (left)
-    let cat_rows = app.settings_category_rows();
     let cat_focused = app.settings_focus_is_categories();
-    let cat_width = top[0].width.saturating_sub(2) as usize;
-    let mut cat_lines: Vec<Line> = Vec::new();
-    for (i, label) in cat_rows.iter().enumerate() {
-        let is_selected = i == app.settings_category_selected;
-        let mut style = Style::default().fg(pal.fg);
-        if is_selected && cat_focused {
-            style = pal.selection();
-        } else if is_selected && !cat_focused {
-            style = pal.meta();
-        }
-        let glyph = if is_selected { "▶ " } else { "  " };
-        let s = truncate_line(&format!("{}{}", glyph, label), cat_width);
-        cat_lines.push(Line::from(Span::styled(s, style)));
-    }
-
-    let cats_block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Plain)
-        .border_style(pal.border_style())
-        .title(Span::styled(" Categories ", pal.meta()));
-    frame.render_widget(
-        Paragraph::new(cat_lines)
-            .block(cats_block)
-            .wrap(Wrap { trim: true }),
-        top[0],
-    );
-
-    // Divider
-    frame.render_widget(
-        Paragraph::new("│".repeat(top[1].height as usize)).style(pal.border_style()),
-        top[1],
-    );
-
-    // Items (right)
-    let rows = app.settings_rows();
     let item_focused = !cat_focused;
-    let item_width = top[2].width.saturating_sub(2) as usize;
-    let mut item_lines: Vec<Line> = Vec::new();
-    for (idx, (label, value)) in rows.iter().enumerate() {
-        let is_selected = idx == app.settings_selected;
-        let mut style = Style::default().fg(pal.fg);
-        if is_selected && item_focused {
-            style = pal.selection();
-        } else if is_selected && !item_focused {
-            style = pal.meta();
-        }
-        let display = format!("{:<18} {}", label, value);
-        item_lines.push(Line::from(Span::styled(
-            truncate_line(&display, item_width),
-            style,
-        )));
-    }
 
-    let items_block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Plain)
-        .border_style(pal.border_style())
-        .title(Span::styled(" Settings ", pal.meta()));
-    frame.render_widget(
-        Paragraph::new(item_lines)
-            .block(items_block)
-            .wrap(Wrap { trim: true }),
-        top[2],
+    // Column separators (reduce boxy feel).
+    render_vsplit(
+        frame,
+        Rect {
+            x: cols[0].right().saturating_sub(1),
+            y: cols[0].y,
+            width: 1,
+            height: cols[0].height,
+        },
+        pal.border_style(),
+    );
+    render_vsplit(
+        frame,
+        Rect {
+            x: cols[1].right().saturating_sub(1),
+            y: cols[1].y,
+            width: 1,
+            height: cols[1].height,
+        },
+        pal.border_style(),
     );
 
-    // Value editor
-    let editor_title = format!(" Value — {} ", app.settings_selected_label());
-    let input_block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(pal.border_style())
-        .title(Span::styled(editor_title, pal.meta()));
-    let input = Paragraph::new(app.settings_input.as_str())
-        .block(input_block)
-        .wrap(Wrap { trim: false })
-        .style(Style::default().fg(pal.fg));
-    frame.render_widget(input, chunks[1]);
+    // Categories list
+    let cat_rows = app.settings_category_rows();
+    let cat_items: Vec<ListItem> = cat_rows
+        .iter()
+        .map(|s| ListItem::new(Span::raw(s.clone())))
+        .collect();
+    let mut cat_state = ListState::default();
+    cat_state.select(Some(
+        app.settings_category_selected
+            .min(cat_items.len().saturating_sub(1)),
+    ));
+    let cats = List::new(cat_items)
+        .block(Block::default().borders(Borders::NONE))
+        .highlight_style(pal.selection())
+        .highlight_symbol("▶ ");
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled("Categories", pal.meta()))),
+        Rect {
+            x: cols[0].x + 1,
+            y: cols[0].y,
+            width: cols[0].width.saturating_sub(2),
+            height: 1,
+        },
+    );
+    frame.render_stateful_widget(
+        cats,
+        cols[0].inner(Margin {
+            vertical: 1,
+            horizontal: 1,
+        }),
+        &mut cat_state,
+    );
 
-    let hints =
-        Paragraph::new(" Enter save • Esc cancel • Tab focus • ↑↓ navigate • ←→ cycle theme")
-            .style(pal.meta());
-    frame.render_widget(hints, chunks[2]);
+    // Items list
+    let rows = app.settings_rows();
+    let item_items: Vec<ListItem> = rows
+        .iter()
+        .map(|(label, value)| {
+            let spans: Vec<Span<'static>> = vec![
+                Span::styled(format!("{label}: "), pal.meta()),
+                Span::styled(value.clone(), Style::default().fg(pal.fg)),
+            ];
+            ListItem::new(Line::from(spans))
+        })
+        .collect();
+    let mut item_state = ListState::default();
+    item_state.select(Some(app.settings_selected.min(item_items.len().saturating_sub(1))));
+    let items_list = List::new(item_items)
+        .block(Block::default().borders(Borders::NONE))
+        .highlight_style(pal.selection())
+        .highlight_symbol("▶ ");
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled("Items", pal.meta()))),
+        Rect {
+            x: cols[1].x + 1,
+            y: cols[1].y,
+            width: cols[1].width.saturating_sub(2),
+            height: 1,
+        },
+    );
+    frame.render_stateful_widget(
+        items_list,
+        cols[1].inner(Margin {
+            vertical: 1,
+            horizontal: 1,
+        }),
+        &mut item_state,
+    );
 
-    // Cursor only when editing items.
+    // Details panel + editor
+    let right = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(6),
+            Constraint::Length(3),
+            Constraint::Length(1),
+        ])
+        .split(cols[2]);
+
+    let mut detail_lines: Vec<Line<'static>> = Vec::new();
+    detail_lines.push(Line::from(Span::styled(
+        app.settings_selected_label(),
+        Style::default().fg(pal.accent).bold(),
+    )));
+    detail_lines.push(Line::from(""));
+    for l in settings_item_help(app) {
+        detail_lines.push(Line::from(l));
+    }
+
+    let details = Paragraph::new(detail_lines)
+        .block(Block::default().borders(Borders::NONE))
+        .wrap(Wrap { trim: false });
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled("Details", pal.meta()))),
+        Rect {
+            x: cols[2].x + 1,
+            y: cols[2].y,
+            width: cols[2].width.saturating_sub(2),
+            height: 1,
+        },
+    );
+    frame.render_widget(
+        details,
+        right[0].inner(Margin {
+            vertical: 1,
+            horizontal: 1,
+        }),
+    );
+
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled("Value", pal.meta()))),
+        Rect {
+            x: right[1].x + 1,
+            y: right[1].y,
+            width: right[1].width.saturating_sub(2),
+            height: 1,
+        },
+    );
+    let editor_inner = Rect {
+        x: right[1].x + 1,
+        y: right[1].y + 1,
+        width: right[1].width.saturating_sub(2),
+        height: right[1].height.saturating_sub(1),
+    };
+    frame.render_widget(
+        Paragraph::new(app.settings_input.as_str())
+            .style(if item_focused {
+                Style::default().fg(pal.fg)
+            } else {
+                pal.meta()
+            })
+            .wrap(Wrap { trim: false }),
+        editor_inner,
+    );
+
     if item_focused {
-        let cursor_x = chunks[1].x + 1 + app.settings_cursor as u16;
-        let cursor_y = chunks[1].y + 1;
+        let cursor_x = editor_inner.x + app.settings_cursor as u16;
+        let cursor_y = editor_inner.y;
         frame.set_cursor_position((cursor_x, cursor_y));
+    }
+
+    frame.render_widget(
+        Paragraph::new("↑↓ navigate  TAB focus  ←→ cycle  ENTER save  ESC cancel")
+            .style(pal.meta()),
+        right[2],
+    );
+}
+
+fn settings_item_help(app: &App) -> Vec<String> {
+    let label = app.settings_selected_label();
+    match label.as_str() {
+        "Provider" => vec![
+            "Select which API/provider to use for LLM calls.".into(),
+            "Use ←→ to cycle, then ENTER to save.".into(),
+        ],
+        "Model" => vec![
+            "Model slug/name used by the selected provider.".into(),
+            "Type to edit, then ENTER to save.".into(),
+        ],
+        "Theme" | "Theme preset" | "Theme Preset" => vec![
+            "Controls UI colors + markdown/syntax styles.".into(),
+            "Use ←→ to cycle, then ENTER to save.".into(),
+        ],
+        "Auto index" | "Auto Index" => vec![
+            "When enabled, Lorikeet indexes the workspace for semantic search.".into(),
+            "Use ←→ to toggle, then ENTER to save.".into(),
+        ],
+        "Resume last session" | "Resume Last Session" => vec![
+            "When enabled, Lorikeet resumes the last session on startup.".into(),
+            "Use ←→ to toggle, then ENTER to save.".into(),
+        ],
+        "Sandbox enabled" | "Sandbox Enabled" => vec![
+            "Policy-only sandbox for tools + file access.".into(),
+            "Use ←→ to toggle, then ENTER to save.".into(),
+        ],
+        _ => vec![
+            "Use ↑↓ to pick an item, then edit the value below.".into(),
+            "ENTER saves; ESC cancels.".into(),
+        ],
     }
 }
 
