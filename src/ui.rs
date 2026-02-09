@@ -20,19 +20,36 @@ const INDEXING_SPINNER: &[&str] = &["⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "�
 const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const TOOL_SPINNER_FRAMES: &[&str] = &["◐", "◓", "◑", "◒"];
 
+#[derive(Clone, Copy)]
+struct Fill {
+    style: Style,
+}
+
+impl Fill {
+    fn new(style: Style) -> Self {
+        Self { style }
+    }
+}
+
+impl Widget for Fill {
+    fn render(self, area: Rect, buf: &mut Buffer) {
+        buf.set_style(area, self.style);
+    }
+}
+
 pub fn ui(frame: &mut Frame, app: &mut App) {
     let ui_theme = theme::ui_theme(&app.config, Some(app.workspace_root_path()));
     let pal = ui_theme.palette;
     app.root_area = frame.area();
 
-    // "Opacity" in TUIs is just background fill. If the theme has a non-reset bg,
-    // paint the whole frame so colors look rich and consistent.
-    if pal.bg != Color::Reset {
-        frame.render_widget(
-            Block::default().style(Style::default().bg(pal.bg).fg(pal.fg)),
-            frame.area(),
-        );
-    }
+    // "Opacity" in TUIs is just background fill. We must explicitly paint the buffer;
+    // rendering a styled Block does not reliably fill all cells.
+    let bg_style = if pal.bg == Color::Reset {
+        Style::default()
+    } else {
+        Style::default().bg(pal.bg).fg(pal.fg)
+    };
+    frame.render_widget(Fill::new(bg_style), frame.area());
 
     let split_ratio = app.split_ratio.max(20).min(80);
 
@@ -235,7 +252,7 @@ fn render_command_suggestions_overlay(
 
     frame.render_widget(Clear, area);
     if pal.bg != Color::Reset {
-        frame.render_widget(Block::default().style(Style::default().bg(pal.bg)), area);
+        frame.render_widget(Fill::new(Style::default().bg(pal.bg)), area);
     }
     let block = Block::default()
         .borders(Borders::ALL)
@@ -305,10 +322,7 @@ fn render_settings_popup(frame: &mut Frame, app: &mut App) {
 
     frame.render_widget(Clear, popup_area);
     if pal.bg != Color::Reset {
-        frame.render_widget(
-            Block::default().style(Style::default().bg(pal.bg)),
-            popup_area,
-        );
+        frame.render_widget(Fill::new(Style::default().bg(pal.bg)), popup_area);
     }
 
     let block = Block::default()
@@ -546,10 +560,7 @@ fn render_themes_popup(frame: &mut Frame, app: &mut App) {
 
     frame.render_widget(Clear, popup_area);
     if pal.bg != Color::Reset {
-        frame.render_widget(
-            Block::default().style(Style::default().bg(pal.bg)),
-            popup_area,
-        );
+        frame.render_widget(Fill::new(Style::default().bg(pal.bg)), popup_area);
     }
 
     let block = Block::default()
@@ -707,10 +718,7 @@ fn render_plan_popup(frame: &mut Frame, app: &mut App, ui_theme: &theme::UiTheme
 
     frame.render_widget(Clear, popup_area);
     if pal.bg != Color::Reset {
-        frame.render_widget(
-            Block::default().style(Style::default().bg(pal.bg)),
-            popup_area,
-        );
+        frame.render_widget(Fill::new(Style::default().bg(pal.bg)), popup_area);
     }
     let block = Block::default()
         .borders(Borders::ALL)
