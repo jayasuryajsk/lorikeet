@@ -17,6 +17,21 @@ pub enum LlmProvider {
     Codex,
 }
 
+fn normalize_codex_model(model: &str) -> String {
+    // The Codex ChatGPT backend expects model slugs like `gpt-5.2` / `gpt-5.2-codex`,
+    // not OpenRouter-style `openai/gpt-5.2`.
+    let trimmed = model.trim();
+    if trimmed.is_empty() {
+        return model.to_string();
+    }
+    trimmed
+        .rsplit('/')
+        .next()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| model.to_string())
+}
+
 #[derive(Debug, Serialize)]
 struct ChatRequest {
     model: String,
@@ -412,6 +427,7 @@ pub async fn call_llm(
     tools_enabled: bool,
 ) {
     if matches!(provider, LlmProvider::Codex) {
+        let model = normalize_codex_model(&model);
         call_llm_codex_responses(tx, api_key, model, messages, tools_enabled).await;
         return;
     }
