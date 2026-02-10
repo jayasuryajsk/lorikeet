@@ -540,6 +540,10 @@ fn settings_item_help(app: &App) -> Vec<String> {
             "Controls UI colors + markdown/syntax styles.".into(),
             "Use ←→ to cycle, then ENTER to save.".into(),
         ],
+        "Theme bg" | "Theme background" | "Theme Background" => vec![
+            "Controls whether Lorikeet forces a solid background.".into(),
+            "inherit = use terminal theme (cleaner). solid = paint the whole UI.".into(),
+        ],
         "Auto index" | "Auto Index" => vec![
             "When enabled, Lorikeet indexes the workspace for semantic search.".into(),
             "Use ←→ to toggle, then ENTER to save.".into(),

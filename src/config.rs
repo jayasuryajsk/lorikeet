@@ -34,6 +34,9 @@ pub struct SandboxConfig {
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct ThemeConfig {
     pub preset: Option<String>,
+    /// "inherit" (default): don't force a background; let the terminal theme show through.
+    /// "solid": force the theme background across the whole UI.
+    pub background: Option<String>,
     pub file_categories: Option<HashMap<String, String>>,
     pub file_extensions: Option<HashMap<String, String>>,
 }

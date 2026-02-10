@@ -1555,6 +1555,8 @@ impl App {
                 }
                 if self.current_settings_item() == SettingsItem::ThemePreset {
                     self.cycle_theme_preset(false);
+                } else if self.current_settings_item() == SettingsItem::ThemeBackground {
+                    self.cycle_theme_background(false);
                 } else if self.current_settings_item() == SettingsItem::Provider {
                     self.cycle_provider(false);
                 } else if self.current_settings_item() == SettingsItem::Model
@@ -1571,6 +1573,8 @@ impl App {
                 }
                 if self.current_settings_item() == SettingsItem::ThemePreset {
                     self.cycle_theme_preset(true);
+                } else if self.current_settings_item() == SettingsItem::ThemeBackground {
+                    self.cycle_theme_background(true);
                 } else if self.current_settings_item() == SettingsItem::Provider {
                     self.cycle_provider(true);
                 } else if self.current_settings_item() == SettingsItem::Model
@@ -1664,6 +1668,12 @@ impl App {
                 .and_then(|g| g.model.clone())
                 .unwrap_or_else(|| crate::llm::MODEL.to_string()),
             SettingsItem::ThemePreset => crate::theme::ui_theme_name(&self.settings_draft),
+            SettingsItem::ThemeBackground => self
+                .settings_draft
+                .theme
+                .as_ref()
+                .and_then(|t| t.background.clone())
+                .unwrap_or_else(|| "inherit".to_string()),
             SettingsItem::SplitRatio => self
                 .settings_draft
                 .general
@@ -1831,6 +1841,15 @@ impl App {
                 }
                 self.settings_draft.theme = Some(theme_cfg);
             }
+            SettingsItem::ThemeBackground => {
+                let mut theme_cfg = self.settings_draft.theme.clone().unwrap_or_default();
+                let v = self.settings_input.trim().to_lowercase();
+                theme_cfg.background = Some(match v.as_str() {
+                    "solid" => "solid".to_string(),
+                    _ => "inherit".to_string(),
+                });
+                self.settings_draft.theme = Some(theme_cfg);
+            }
             SettingsItem::SplitRatio => {
                 if let Ok(val) = self.settings_input.trim().parse::<u16>() {
                     let mut general = self.settings_draft.general.clone().unwrap_or_default();
@@ -1936,6 +1955,38 @@ impl App {
                 self.settings_draft.sandbox = Some(sandbox);
             }
         }
+    }
+
+    fn cycle_theme_background(&mut self, forward: bool) {
+        let cur = self
+            .settings_draft
+            .theme
+            .as_ref()
+            .and_then(|t| t.background.as_deref())
+            .unwrap_or("inherit")
+            .trim()
+            .to_lowercase();
+
+        let modes = ["inherit", "solid"];
+        let idx = modes
+            .iter()
+            .position(|m| *m == cur)
+            .unwrap_or(0);
+        let next = if forward {
+            modes[(idx + 1) % modes.len()]
+        } else {
+            modes[(idx + modes.len() - 1) % modes.len()]
+        };
+
+        let mut theme_cfg = self.settings_draft.theme.clone().unwrap_or_default();
+        theme_cfg.background = Some(next.to_string());
+        self.settings_draft.theme = Some(theme_cfg);
+
+        self.settings_input = next.to_string();
+        self.settings_cursor = self.settings_input.len();
+
+        // Live preview
+        self.config = self.settings_draft.clone();
     }
 
     fn try_switch_provider(&mut self, provider: &str) -> Result<(), String> {
@@ -3559,7 +3610,10 @@ impl SettingsCategory {
                 SettingsItem::AutoIndex,
                 SettingsItem::ResumeLastSession,
             ],
-            SettingsCategory::Appearance => &[SettingsItem::ThemePreset],
+            SettingsCategory::Appearance => &[
+                SettingsItem::ThemePreset,
+                SettingsItem::ThemeBackground,
+            ],
             SettingsCategory::Memory => &[
                 SettingsItem::MemoryEnabled,
                 SettingsItem::MemoryAutoInject,
@@ -3585,6 +3639,7 @@ enum SettingsItem {
     Provider,
     Model,
     ThemePreset,
+    ThemeBackground,
     SplitRatio,
     AutoIndex,
     ResumeLastSession,
@@ -3608,6 +3663,7 @@ impl SettingsItem {
             SettingsItem::Provider => "Provider",
             SettingsItem::Model => "Model",
             SettingsItem::ThemePreset => "Theme",
+            SettingsItem::ThemeBackground => "Theme bg",
             SettingsItem::SplitRatio => "Split ratio",
             SettingsItem::AutoIndex => "Auto index",
             SettingsItem::ResumeLastSession => "Resume last session",

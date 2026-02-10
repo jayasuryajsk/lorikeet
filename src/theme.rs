@@ -136,7 +136,8 @@ pub struct UiTheme {
 
 pub fn ui_theme(config: &AppConfig, workspace_root: Option<&Path>) -> UiTheme {
     let name = normalize_theme_name(&ui_theme_name(config));
-    load_ui_theme(&name, workspace_root).unwrap_or_else(|| theme_from_palette(system_palette()))
+    let t = load_ui_theme(&name, workspace_root).unwrap_or_else(|| theme_from_palette(system_palette()));
+    apply_background_mode(t, config)
 }
 
 pub fn ui_theme_by_name(name: &str, workspace_root: Option<&Path>) -> UiTheme {
@@ -161,6 +162,56 @@ pub fn user_markdown_theme(base: &UiTheme) -> MarkdownTheme {
 
 pub fn ui_palette(config: &AppConfig, workspace_root: Option<&Path>) -> UiPalette {
     ui_theme(config, workspace_root).palette
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BackgroundMode {
+    Inherit,
+    Solid,
+}
+
+fn background_mode(config: &AppConfig) -> BackgroundMode {
+    let v = config
+        .theme
+        .as_ref()
+        .and_then(|t| t.background.as_deref())
+        .unwrap_or("inherit")
+        .trim()
+        .to_lowercase();
+    match v.as_str() {
+        "solid" => BackgroundMode::Solid,
+        _ => BackgroundMode::Inherit,
+    }
+}
+
+fn apply_background_mode(mut t: UiTheme, config: &AppConfig) -> UiTheme {
+    match background_mode(config) {
+        BackgroundMode::Solid => t,
+        BackgroundMode::Inherit => {
+            // "Stop fighting the terminal":
+            // - inherit terminal bg/fg (Reset), but keep semantic accent colors from the selected theme
+            //   so the UI still has personality.
+            let p = t.palette;
+            t.palette = UiPalette {
+                fg: Color::Reset,
+                fg_dim: Color::DarkGray,
+                bg: Color::Reset,
+                border: Color::DarkGray,
+                accent: p.accent,
+                ok: p.ok,
+                warn: p.warn,
+                err: p.err,
+            };
+
+            // Re-derive sub-themes from the new palette so markdown/tool-trace match.
+            let rebuilt = theme_from_palette(t.palette);
+            t.markdown = rebuilt.markdown;
+            t.syntax = rebuilt.syntax;
+            t.tool_trace = rebuilt.tool_trace;
+            t.files = rebuilt.files;
+            t
+        }
+    }
 }
 
 pub fn builtin_theme_tagline(name: &str) -> Option<&'static str> {
