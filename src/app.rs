@@ -371,6 +371,10 @@ pub struct App {
     pub splitter_area: Rect,
     pub split_ratio: u16, // left pane percentage
     dragging_splitter: bool,
+    pub settings_popup_area: Rect,
+    pub settings_categories_area: Rect,
+    pub settings_items_area: Rect,
+    pub settings_editor_area: Rect,
     // Settings UI
     pub settings_open: bool,
     pub settings_category_selected: usize,
@@ -514,6 +518,10 @@ impl App {
             splitter_area: Rect::default(),
             split_ratio,
             dragging_splitter: false,
+            settings_popup_area: Rect::default(),
+            settings_categories_area: Rect::default(),
+            settings_items_area: Rect::default(),
+            settings_editor_area: Rect::default(),
             settings_open: false,
             settings_category_selected: 0,
             settings_selected: 0,
@@ -2748,6 +2756,93 @@ impl App {
     }
 
     fn handle_mouse(&mut self, mouse: MouseEvent, chat_area: Rect, context_area: Rect) {
+        let contains = |area: Rect, col: u16, row: u16| {
+            col >= area.x && col < area.right() && row >= area.y && row < area.bottom()
+        };
+
+        if self.settings_open {
+            let in_popup = contains(self.settings_popup_area, mouse.column, mouse.row);
+            let in_cats = contains(self.settings_categories_area, mouse.column, mouse.row);
+            let in_items = contains(self.settings_items_area, mouse.column, mouse.row);
+            let in_editor = contains(self.settings_editor_area, mouse.column, mouse.row);
+
+            match mouse.kind {
+                MouseEventKind::Down(MouseButton::Left) => {
+                    if !in_popup {
+                        return;
+                    }
+
+                    if in_cats {
+                        self.settings_focus = SettingsFocus::Categories;
+                        let idx = mouse.row.saturating_sub(self.settings_categories_area.y) as usize;
+                        let max = self.settings_categories().len().saturating_sub(1);
+                        self.settings_category_selected = idx.min(max);
+                        self.settings_selected = 0;
+                        self.load_settings_input();
+                        return;
+                    }
+
+                    if in_items {
+                        self.settings_focus = SettingsFocus::Items;
+                        let idx = mouse.row.saturating_sub(self.settings_items_area.y) as usize;
+                        let max = self.current_settings_items().len().saturating_sub(1);
+                        self.settings_selected = idx.min(max);
+                        self.load_settings_input();
+                        return;
+                    }
+
+                    if in_editor {
+                        self.settings_focus = SettingsFocus::Items;
+                        let col = mouse.column.saturating_sub(self.settings_editor_area.x) as usize;
+                        self.settings_cursor = col.min(self.settings_input.chars().count());
+                        return;
+                    }
+                }
+                MouseEventKind::ScrollUp => {
+                    if in_cats {
+                        self.settings_focus = SettingsFocus::Categories;
+                        if self.settings_category_selected > 0 {
+                            self.settings_category_selected -= 1;
+                            self.settings_selected = 0;
+                            self.load_settings_input();
+                        }
+                        return;
+                    }
+                    if in_items {
+                        self.settings_focus = SettingsFocus::Items;
+                        if self.settings_selected > 0 {
+                            self.settings_selected -= 1;
+                            self.load_settings_input();
+                        }
+                        return;
+                    }
+                }
+                MouseEventKind::ScrollDown => {
+                    if in_cats {
+                        self.settings_focus = SettingsFocus::Categories;
+                        let max = self.settings_categories().len().saturating_sub(1);
+                        if self.settings_category_selected < max {
+                            self.settings_category_selected += 1;
+                            self.settings_selected = 0;
+                            self.load_settings_input();
+                        }
+                        return;
+                    }
+                    if in_items {
+                        self.settings_focus = SettingsFocus::Items;
+                        let max = self.current_settings_items().len().saturating_sub(1);
+                        if self.settings_selected < max {
+                            self.settings_selected += 1;
+                            self.load_settings_input();
+                        }
+                        return;
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
+
         let in_chat = mouse.column >= chat_area.x
             && mouse.column < chat_area.right()
             && mouse.row >= chat_area.y

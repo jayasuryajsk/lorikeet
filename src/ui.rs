@@ -318,18 +318,30 @@ fn render_indexing_status(status: &IndexingStatus, spinner_frame: usize) -> Stri
 }
 
 fn render_settings_popup(frame: &mut Frame, app: &mut App) {
-    let ui_theme = theme::ui_theme(&app.config, Some(app.workspace_root_path()));
-    let pal = ui_theme.palette;
+    // Settings should feel like a focused modal surface (opaque), even when the main UI
+    // inherits terminal background. Use the selected preset's raw palette here.
+    let preset = theme::ui_theme_name(&app.config);
+    let modal_theme = theme::ui_theme_by_name(&preset, Some(app.workspace_root_path()));
+    let pal = modal_theme.palette;
     let area = frame.area();
     let popup_area = centered_rect(74, 66, area);
+    app.settings_popup_area = popup_area;
 
     frame.render_widget(Clear, popup_area);
-    if pal.bg != Color::Reset {
-        frame.render_widget(
-            Fill::new(Style::default().bg(pal.bg).fg(pal.fg)),
-            popup_area,
-        );
-    }
+    let modal_bg = if pal.bg == Color::Reset {
+        Color::Black
+    } else {
+        pal.bg
+    };
+    let modal_fg = if pal.fg == Color::Reset {
+        Color::White
+    } else {
+        pal.fg
+    };
+    frame.render_widget(
+        Fill::new(Style::default().bg(modal_bg).fg(modal_fg)),
+        popup_area,
+    );
 
     let block = Block::default()
         .borders(Borders::ALL)
@@ -401,14 +413,12 @@ fn render_settings_popup(frame: &mut Frame, app: &mut App) {
             height: 1,
         },
     );
-    frame.render_stateful_widget(
-        cats,
-        cols[0].inner(Margin {
-            vertical: 1,
-            horizontal: 1,
-        }),
-        &mut cat_state,
-    );
+    let cats_area = cols[0].inner(Margin {
+        vertical: 1,
+        horizontal: 1,
+    });
+    app.settings_categories_area = cats_area;
+    frame.render_stateful_widget(cats, cats_area, &mut cat_state);
 
     // Items list
     let rows = app.settings_rows();
@@ -437,14 +447,12 @@ fn render_settings_popup(frame: &mut Frame, app: &mut App) {
             height: 1,
         },
     );
-    frame.render_stateful_widget(
-        items_list,
-        cols[1].inner(Margin {
-            vertical: 1,
-            horizontal: 1,
-        }),
-        &mut item_state,
-    );
+    let items_area = cols[1].inner(Margin {
+        vertical: 1,
+        horizontal: 1,
+    });
+    app.settings_items_area = items_area;
+    frame.render_stateful_widget(items_list, items_area, &mut item_state);
 
     // Details panel + editor
     let right = Layout::default()
@@ -501,6 +509,7 @@ fn render_settings_popup(frame: &mut Frame, app: &mut App) {
         width: right[1].width.saturating_sub(2),
         height: right[1].height.saturating_sub(1),
     };
+    app.settings_editor_area = editor_inner;
     frame.render_widget(
         Paragraph::new(app.settings_input.as_str())
             .style(if item_focused {
@@ -519,7 +528,7 @@ fn render_settings_popup(frame: &mut Frame, app: &mut App) {
     }
 
     frame.render_widget(
-        Paragraph::new("↑↓ navigate  TAB focus  ←→ cycle  ENTER save  ESC cancel")
+        Paragraph::new("↑↓ navigate  TAB focus  ←→ cycle  click/select  wheel scroll  ENTER save  ESC cancel")
             .style(pal.meta()),
         right[2],
     );
