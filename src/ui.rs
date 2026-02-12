@@ -184,20 +184,23 @@ pub fn ui(frame: &mut Frame, app: &mut App) {
         preset_theme.palette.fg
     };
 
-    if input_bg != Color::Reset {
-        frame.render_widget(
-            Fill::new(Style::default().bg(input_bg).fg(input_fg)),
-            left_chunks[1],
-        );
-    }
-
     let input_block = Block::default()
         .borders(Borders::ALL)
         .border_style(chat_border_style)
         .title(input_title);
 
+    // Paint only the *inside* of the input box (not the border). This avoids the "color over the
+    // borders" look and reads more like a filled composer surface.
+    let input_inner = input_block.inner(left_chunks[1]);
+    if input_bg != Color::Reset && input_inner.width > 0 && input_inner.height > 0 {
+        frame.render_widget(
+            Fill::new(Style::default().bg(input_bg).fg(input_fg)),
+            input_inner,
+        );
+    }
+
     let input_widget = Paragraph::new(app.input.as_str())
-        .style(Style::default().fg(input_fg).bg(input_bg))
+        .style(Style::default().fg(input_fg))
         .block(input_block)
         .wrap(Wrap { trim: false });
     frame.render_widget(input_widget, left_chunks[1]);
