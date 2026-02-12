@@ -169,12 +169,35 @@ pub fn ui(frame: &mut Frame, app: &mut App) {
     // Input
     let input_title = " Input ";
 
+    // Give the input bar a stronger surface color from the selected preset so it reads
+    // as an "active composer" even when the overall UI uses background inherit mode.
+    let preset_name = theme::ui_theme_name(&app.config);
+    let preset_theme = theme::ui_theme_by_name(&preset_name, Some(app.workspace_root_path()));
+    let input_bg = if preset_theme.palette.bg == Color::Reset {
+        pal.bg
+    } else {
+        preset_theme.palette.bg
+    };
+    let input_fg = if preset_theme.palette.fg == Color::Reset {
+        pal.fg
+    } else {
+        preset_theme.palette.fg
+    };
+
+    if input_bg != Color::Reset {
+        frame.render_widget(
+            Fill::new(Style::default().bg(input_bg).fg(input_fg)),
+            left_chunks[1],
+        );
+    }
+
     let input_block = Block::default()
         .borders(Borders::ALL)
         .border_style(chat_border_style)
         .title(input_title);
 
     let input_widget = Paragraph::new(app.input.as_str())
+        .style(Style::default().fg(input_fg).bg(input_bg))
         .block(input_block)
         .wrap(Wrap { trim: false });
     frame.render_widget(input_widget, left_chunks[1]);
